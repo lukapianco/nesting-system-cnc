@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DXF Nesting Industrial — Worker Threads & SSE</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="top-bar">
+    <div class="brand">
+      <span class="badge-tag">ENGINE V3 — WORKER_THREADS + SSE</span>
+      <h1>SISTEMA DE NESTING INDUSTRIAL TRUE-SHAPE (.DXF)</h1>
+    </div>
+    <div class="header-actions">
+      <select id="presetSelect" class="select-input preset-select">
+        <option value="icamento">Exemplo 1: Olhal de Içamento (Sua Imagem + In-Hole)</option>
+        <option value="trueshape">Exemplo 2: Peças em "L" + Nesting In-Hole</option>
+        <option value="industrial">Exemplo 3: Kit Industrial Completo</option>
+      </select>
+      <button id="btnLoadSample" class="btn btn-secondary">Carregar Peças</button>
+      <button id="btnLoadSteppedSheet" class="btn btn-outline">Testar Chapa Desenhada (Formato L/Degrau)</button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="sidebar">
+      <!-- STATUS DE HARDWARE E WORKERS DA VPS -->
+      <section class="panel-card hw-card">
+        <h2>Hardware do Servidor (VPS)</h2>
+        <div id="hwInfoBox" class="hw-info">Verificando núcleos e GPU no backend...</div>
+      </section>
+
+      <!-- 1. ARQUIVO DE PEÇAS E ARQUIVO DE CHAPA (.DXF) -->
+      <section class="panel-card">
+        <h2>1. Arquivos .DXF (Peças e Chapa)</h2>
+        <label class="file-dropzone" id="dropzone">
+          <input type="file" id="dxfInput" accept=".dxf" hidden />
+          <span class="drop-title" id="fileNameLabel">1º Enviar .DXF das Peças de Corte</span>
+          <span class="drop-sub">Suporta Polígonos, Chanfros, Círculos e Furos</span>
+        </label>
+
+        <div style="margin-top: 10px;">
+          <label class="file-dropzone sheet-dropzone">
+            <input type="file" id="sheetDxfInput" accept=".dxf" hidden />
+            <span class="drop-title" id="sheetFileNameLabel">2º (Opcional) Enviar .DXF da Chapa Principal</span>
+            <span class="drop-sub">Ajusta as peças dentro do desenho exato da sua chapa</span>
+          </label>
+          <button id="btnClearCustomSheet" class="btn btn-outline full-width btn-sm hidden" style="margin-top:6px;">
+            Voltar para Chapa Retangular por Medidas (X/Y)
+          </button>
+        </div>
+      </section>
+
+      <!-- 2. PARÂMETROS E OTIMIZAÇÕES INDUSTRIAIS -->
+      <section class="panel-card">
+        <h2>2. Parâmetros e Motor (Até 100.000 Cálculos)</h2>
+        <div class="form-grid">
+          <div class="input-group">
+            <label for="sheetWidth">Largura Chapa X (mm)</label>
+            <input type="number" id="sheetWidth" value="220" min="50" step="10" />
+          </div>
+          <div class="input-group">
+            <label for="sheetHeight">Altura Chapa Y (mm)</label>
+            <input type="number" id="sheetHeight" value="140" min="50" step="10" />
+          </div>
+          <div class="input-group">
+            <label for="kerfInput">Distância / Kerf (mm)</label>
+            <input type="number" id="kerfInput" value="6" min="0" step="1" />
+          </div>
+          <div class="input-group">
+            <label for="minHoleSize">Furo Mín. Útil (mm)</label>
+            <input type="number" id="minHoleSize" value="15" min="1" step="5" />
+          </div>
+          <div class="input-group">
+            <label for="minRemnantSize">Retalho Mín. Chapa (mm)</label>
+            <input type="number" id="minRemnantSize" value="40" min="10" step="10" />
+          </div>
+          <div class="input-group">
+            <label for="iterationsInput">Nº de Cálculos (Worker)</label>
+            <input type="number" id="iterationsInput" value="20000" min="100" max="200000" step="5000" />
+          </div>
+        </div>
+
+        <div class="input-group" style="margin-bottom: 10px;">
+          <label for="optimizationGoal">Critério do Juiz:</label>
+          <select id="optimizationGoal" class="select-input">
+            <option value="MAX_UTILIZATION">Maior % Aproveitamento (Soma Total de Retalhos)</option>
+            <option value="MAX_SINGLE_REMNANT">Maior Retalho Único Inteiro (Chapa Contínua)</option>
+            <option value="MIN_BOUNDING_BOX">Menor Caixa Ocupada (Compactação X/Y)</option>
+          </select>
+        </div>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="allowRotation" checked />
+          <span>Permitir rotação automática de 90°</span>
+        </label>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="enableInHole" checked />
+          <span>Ativar Nesting In-Hole (Encaixar peças menores dentro de furos)</span>
+        </label>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="commonLineInput" />
+          <span>Ativar Corte Comum em Paredes Retas (Feixe: 0.4mm)</span>
+        </label>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="showRemnants" checked />
+          <span>Destacar retalhos retangulares/quadrados na tela</span>
+        </label>
+
+        <button id="btnRecalculate" class="btn btn-primary full-width">
+          Executar Cálculos no Backend (SSE)
+        </button>
+      </section>
+
+      <!-- 3. EXPORTAÇÃO DXF -->
+      <section class="panel-card export-card">
+        <h2>3. Exportar .DXF p/ Máquina</h2>
+        <label class="checkbox-row">
+          <input type="checkbox" id="exportIncludeRemnants" checked />
+          <span>Manter "Retalho da Chapa (Sobra Útil)" no .DXF</span>
+        </label>
+        <button id="btnExportDxf" class="btn btn-export full-width">Baixar .DXF Final do Nesting</button>
+      </section>
+
+      <!-- 4. ÍNDICES -->
+      <section class="panel-card metrics-card">
+        <h2>4. Índices de Aproveitamento</h2>
+        <div class="kpi-highlight">
+          <div>
+            <span class="kpi-label">Aproveitamento na Área Consumida</span>
+            <small class="kpi-sub" id="kpiRawRatio">Bruto na chapa: 0.0%</small>
+          </div>
+          <strong class="kpi-value" id="kpiUtilization">0.0%</strong>
+        </div>
+        <div class="metrics-list">
+          <div class="metric-item"><span>Área Total da Chapa:</span><strong id="metricSheetArea">0 cm²</strong></div>
+          <div class="metric-item"><span>Área Útil de Peças:</span><strong id="metricUsedArea">0 cm²</strong></div>
+          <div class="metric-item"><span>Peças Encaixadas:</span><strong id="metricPlacedCount">0 / 0</strong></div>
+          <div class="metric-item highlight-remnant"><span>Sobra em Retalhos:</span><strong id="metricRemnantArea">0 cm²</strong></div>
+          <div class="metric-item highlight-hole"><span>Peças Alocadas Dentro de Furos:</span><strong id="metricInHoleParts">0</strong></div>
+          <div class="metric-item highlight-hole"><span>Miolos de Furo Gratuitos (Sem Duplicar):</span><strong id="metricFreeSlugs">0</strong></div>
+        </div>
+      </section>
+    </aside>
+
+    <section class="content-area">
+      <div class="panel-card canvas-section">
+        <div class="section-header">
+          <div>
+            <h2>Simulação Visual da Chapa & Retalhos</h2>
+            <p class="subtitle" id="sheetSpecText">Aguardando simulação...</p>
+          </div>
+          <div class="legend">
+            <span class="legend-item"><i class="swatch swatch-part"></i> Peça Principal</span>
+            <span class="legend-item"><i class="swatch swatch-promoted"></i> Peça Alocada Dentro de Furo (In-Hole)</span>
+            <span class="legend-item"><i class="swatch swatch-hole-ok"></i> Furo c/ Miolo Aproveitável</span>
+            <span class="legend-item"><i class="swatch swatch-remnant"></i> Retalho da Chapa (Sobra Útil)</span>
+          </div>
+        </div>
+
+        <div id="progressPanel" class="progress-panel hidden">
+          <div class="progress-header">
+            <span id="progressStatusText">Iniciando Worker Thread no Servidor...</span>
+            <strong id="progressPercentText">0%</strong>
+          </div>
+          <div class="progress-track">
+            <div id="progressBarFill" class="progress-fill"></div>
+          </div>
+          <div class="progress-meta">
+            <span id="progressStrategyText">Velocidade: 0 cálculos/seg</span>
+            <span id="progressBestText">Recorde: 0.0%</span>
+          </div>
+        </div>
+
+        <div class="canvas-wrapper">
+          <canvas id="nestingCanvas" width="940" height="560"></canvas>
+        </div>
+
+        <div id="candidatesBar" class="candidates-bar hidden">
+          <span class="candidates-title">Melhores Layouts Encontrados pelo Worker (Clique para alternar):</span>
+          <div id="candidatesList" class="candidates-list"></div>
+        </div>
+        <div id="unplacedAlert" class="alert-box hidden"></div>
+      </div>
+
+      <div class="panel-card">
+        <div class="section-header">
+          <div>
+            <h2>Peças Separadas & Furos Identificados (Sem Duplicação)</h2>
+            <p class="subtitle">Furos grandes não são duplicados fora da peça: eles abrigam peças menores lá dentro (In-Hole) ou geram miolos prontos automaticamente no corte.</p>
+          </div>
+        </div>
+        <div id="partsGrid" class="parts-grid"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
