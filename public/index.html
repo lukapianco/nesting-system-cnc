@@ -3,23 +3,29 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DXF Nesting Industrial — Worker Threads & SSE</title>
+  <title>DXF Nesting Industrial V4 — Multi-Chapa & Multiplicador de Lote</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="top-bar">
     <div class="brand">
-      <span class="badge-tag">ENGINE V3 — WORKER_THREADS + SSE</span>
-      <h1>SISTEMA DE NESTING INDUSTRIAL TRUE-SHAPE (.DXF)</h1>
+      <span class="badge-tag">ENGINE V4 — TRUE-SHAPE + MULTI-LOTE</span>
+      <h1>SISTEMA DE NESTING INDUSTRIAL (.DXF)</h1>
     </div>
     <div class="header-actions">
       <select id="presetSelect" class="select-input preset-select">
-        <option value="icamento">Exemplo 1: Olhal de Içamento (Sua Imagem + In-Hole)</option>
-        <option value="trueshape">Exemplo 2: Peças em "L" + Nesting In-Hole</option>
-        <option value="industrial">Exemplo 3: Kit Industrial Completo</option>
+        <option value="icamento">Peças 1: Olhal de Içamento + Buchas In-Hole</option>
+        <option value="trueshape">Peças 2: Cantoneiras em "L" + In-Hole</option>
+        <option value="industrial">Peças 3: Kit Industrial Completo</option>
       </select>
       <button id="btnLoadSample" class="btn btn-secondary">Carregar Peças</button>
-      <button id="btnLoadSteppedSheet" class="btn btn-outline">Testar Chapa Desenhada (Formato L/Degrau)</button>
+
+      <select id="sheetPresetSelect" class="select-input preset-select">
+        <option value="rect">Chapa Padrão: Retangular (Medidas X/Y)</option>
+        <option value="sheet_stepped">Chapa DXF 1: Formato em Degrau ("L") c/ 2 Furos</option>
+        <option value="sheet_ramp_hole">Chapa DXF 2: Rampa 2012x691 c/ Furo Central (Seu Teste 1)</option>
+        <option value="sheet_tooth_slot">Chapa DXF 3: Dente + Furo Reto 722x438 (Seu Teste 2)</option>
+      </select>
     </div>
   </header>
 
@@ -31,7 +37,7 @@
         <div id="hwInfoBox" class="hw-info">Verificando núcleos e GPU no backend...</div>
       </section>
 
-      <!-- 1. ARQUIVO DE PEÇAS E ARQUIVO DE CHAPA (.DXF) -->
+      <!-- 1. ARQUIVOS .DXF (PEÇAS E CHAPA) -->
       <section class="panel-card">
         <h2>1. Arquivos .DXF (Peças e Chapa)</h2>
         <label class="file-dropzone" id="dropzone">
@@ -44,7 +50,7 @@
           <label class="file-dropzone sheet-dropzone">
             <input type="file" id="sheetDxfInput" accept=".dxf" hidden />
             <span class="drop-title" id="sheetFileNameLabel">2º (Opcional) Enviar .DXF da Chapa Principal</span>
-            <span class="drop-sub">Ajusta as peças dentro do desenho exato da sua chapa</span>
+            <span class="drop-sub">Reconhece qualquer contorno externo e furos da chapa</span>
           </label>
           <button id="btnClearCustomSheet" class="btn btn-outline full-width btn-sm hidden" style="margin-top:6px;">
             Voltar para Chapa Retangular por Medidas (X/Y)
@@ -52,17 +58,36 @@
         </div>
       </section>
 
-      <!-- 2. PARÂMETROS E OTIMIZAÇÕES INDUSTRIAIS -->
+      <!-- 2. MULTIPLICADOR INTUITIVO DE QUANTIDADE DO LOTE -->
+      <section class="panel-card batch-card">
+        <div class="batch-header-row">
+          <h2>2. Quantidade de Peças (Lote)</h2>
+          <span class="batch-total-badge" id="totalPartsBadge">Total: 0 pçs</span>
+        </div>
+        <p class="batch-helper">Defina quantas cópias de cada peça deseja cortar na chapa:</p>
+
+        <div class="quick-batch-bar">
+          <button type="button" class="chip-btn" data-mult="1">Tudo 1x</button>
+          <button type="button" class="chip-btn" data-mult="2">Tudo 2x</button>
+          <button type="button" class="chip-btn" data-mult="5">Tudo 5x</button>
+          <button type="button" class="chip-btn" data-mult="10">Tudo 10x</button>
+          <button type="button" id="btnAutoFillSheet" class="chip-btn chip-autofill">Auto-Lotar Chapa</button>
+        </div>
+
+        <div id="sidebarQtyList" class="sidebar-qty-list"></div>
+      </section>
+
+      <!-- 3. PARÂMETROS E OTIMIZAÇÕES INDUSTRIAIS -->
       <section class="panel-card">
-        <h2>2. Parâmetros e Motor (Até 100.000 Cálculos)</h2>
+        <h2>3. Parâmetros da Chapa e Motor</h2>
         <div class="form-grid">
           <div class="input-group">
             <label for="sheetWidth">Largura Chapa X (mm)</label>
-            <input type="number" id="sheetWidth" value="220" min="50" step="10" />
+            <input type="number" id="sheetWidth" value="180" min="50" step="10" />
           </div>
           <div class="input-group">
             <label for="sheetHeight">Altura Chapa Y (mm)</label>
-            <input type="number" id="sheetHeight" value="140" min="50" step="10" />
+            <input type="number" id="sheetHeight" value="120" min="50" step="10" />
           </div>
           <div class="input-group">
             <label for="kerfInput">Distância / Kerf (mm)</label>
@@ -70,20 +95,20 @@
           </div>
           <div class="input-group">
             <label for="minHoleSize">Furo Mín. Útil (mm)</label>
-            <input type="number" id="minHoleSize" value="15" min="1" step="5" />
+            <input type="number" id="minHoleSize" value="10" min="1" step="5" />
           </div>
           <div class="input-group">
             <label for="minRemnantSize">Retalho Mín. Chapa (mm)</label>
-            <input type="number" id="minRemnantSize" value="40" min="10" step="10" />
+            <input type="number" id="minRemnantSize" value="35" min="10" step="10" />
           </div>
           <div class="input-group">
             <label for="iterationsInput">Nº de Cálculos (Worker)</label>
-            <input type="number" id="iterationsInput" value="20000" min="100" max="200000" step="5000" />
+            <input type="number" id="iterationsInput" value="15000" min="100" max="200000" step="5000" />
           </div>
         </div>
 
         <div class="input-group" style="margin-bottom: 10px;">
-          <label for="optimizationGoal">Critério do Juiz:</label>
+          <label for="optimizationGoal">Critério Principal do Juiz:</label>
           <select id="optimizationGoal" class="select-input">
             <option value="MAX_UTILIZATION">Maior % Aproveitamento (Soma Total de Retalhos)</option>
             <option value="MAX_SINGLE_REMNANT">Maior Retalho Único Inteiro (Chapa Contínua)</option>
@@ -93,7 +118,12 @@
 
         <label class="checkbox-row">
           <input type="checkbox" id="allowRotation" checked />
-          <span>Permitir rotação automática de 90°</span>
+          <span>Permitir rotação ortogonal completa (0°, 90°, 180°, 270°)</span>
+        </label>
+
+        <label class="checkbox-row">
+          <input type="checkbox" id="allowFreeAngles" />
+          <span>Permitir ângulos diagonais de 45° (Ideal p/ rampas e triângulos)</span>
         </label>
 
         <label class="checkbox-row">
@@ -116,9 +146,9 @@
         </button>
       </section>
 
-      <!-- 3. EXPORTAÇÃO DXF -->
+      <!-- 4. EXPORTAÇÃO DXF -->
       <section class="panel-card export-card">
-        <h2>3. Exportar .DXF p/ Máquina</h2>
+        <h2>4. Exportar .DXF p/ Máquina</h2>
         <label class="checkbox-row">
           <input type="checkbox" id="exportIncludeRemnants" checked />
           <span>Manter "Retalho da Chapa (Sobra Útil)" no .DXF</span>
@@ -126,9 +156,9 @@
         <button id="btnExportDxf" class="btn btn-export full-width">Baixar .DXF Final do Nesting</button>
       </section>
 
-      <!-- 4. ÍNDICES -->
+      <!-- 5. ÍNDICES -->
       <section class="panel-card metrics-card">
-        <h2>4. Índices de Aproveitamento</h2>
+        <h2>5. Índices de Aproveitamento</h2>
         <div class="kpi-highlight">
           <div>
             <span class="kpi-label">Aproveitamento na Área Consumida</span>
@@ -137,12 +167,12 @@
           <strong class="kpi-value" id="kpiUtilization">0.0%</strong>
         </div>
         <div class="metrics-list">
-          <div class="metric-item"><span>Área Total da Chapa:</span><strong id="metricSheetArea">0 cm²</strong></div>
+          <div class="metric-item"><span>Área Líquida da Chapa:</span><strong id="metricSheetArea">0 cm²</strong></div>
           <div class="metric-item"><span>Área Útil de Peças:</span><strong id="metricUsedArea">0 cm²</strong></div>
-          <div class="metric-item"><span>Peças Encaixadas:</span><strong id="metricPlacedCount">0 / 0</strong></div>
+          <div class="metric-item"><span>Peças Encaixadas do Lote:</span><strong id="metricPlacedCount">0 / 0</strong></div>
           <div class="metric-item highlight-remnant"><span>Sobra em Retalhos:</span><strong id="metricRemnantArea">0 cm²</strong></div>
           <div class="metric-item highlight-hole"><span>Peças Alocadas Dentro de Furos:</span><strong id="metricInHoleParts">0</strong></div>
-          <div class="metric-item highlight-hole"><span>Miolos de Furo Gratuitos (Sem Duplicar):</span><strong id="metricFreeSlugs">0</strong></div>
+          <div class="metric-item highlight-hole"><span>Miolos de Furo Gratuitos:</span><strong id="metricFreeSlugs">0</strong></div>
         </div>
       </section>
     </aside>
@@ -156,9 +186,9 @@
           </div>
           <div class="legend">
             <span class="legend-item"><i class="swatch swatch-part"></i> Peça Principal</span>
-            <span class="legend-item"><i class="swatch swatch-promoted"></i> Peça Alocada Dentro de Furo (In-Hole)</span>
-            <span class="legend-item"><i class="swatch swatch-hole-ok"></i> Furo c/ Miolo Aproveitável</span>
-            <span class="legend-item"><i class="swatch swatch-remnant"></i> Retalho da Chapa (Sobra Útil)</span>
+            <span class="legend-item"><i class="swatch swatch-promoted"></i> Peça In-Hole</span>
+            <span class="legend-item"><i class="swatch swatch-hole-ok"></i> Furo Útil</span>
+            <span class="legend-item"><i class="swatch swatch-remnant"></i> Retalho da Chapa</span>
           </div>
         </div>
 
@@ -176,12 +206,23 @@
           </div>
         </div>
 
+        <!-- BARRA DE ZOOM E INSPETOR DE COORDENADAS -->
+        <div class="canvas-toolbar">
+          <div class="zoom-controls">
+            <button type="button" id="btnZoomIn" class="chip-btn">Zoom +</button>
+            <button type="button" id="btnZoomOut" class="chip-btn">Zoom -</button>
+            <button type="button" id="btnZoomReset" class="chip-btn">100% (Ajustar)</button>
+            <span class="zoom-hint">Use a rodinha do mouse p/ Zoom e arraste p/ mover</span>
+          </div>
+          <div id="hoverInspector" class="hover-inspector">Passe o mouse sobre uma peça ou retalho</div>
+        </div>
+
         <div class="canvas-wrapper">
-          <canvas id="nestingCanvas" width="940" height="560"></canvas>
+          <canvas id="nestingCanvas" width="960" height="580"></canvas>
         </div>
 
         <div id="candidatesBar" class="candidates-bar hidden">
-          <span class="candidates-title">Melhores Layouts Encontrados pelo Worker (Clique para alternar):</span>
+          <span class="candidates-title">Melhores Layouts Encontrados pelo Worker (Clique para inspecionar):</span>
           <div id="candidatesList" class="candidates-list"></div>
         </div>
         <div id="unplacedAlert" class="alert-box hidden"></div>
@@ -190,8 +231,8 @@
       <div class="panel-card">
         <div class="section-header">
           <div>
-            <h2>Peças Separadas & Furos Identificados (Sem Duplicação)</h2>
-            <p class="subtitle">Furos grandes não são duplicados fora da peça: eles abrigam peças menores lá dentro (In-Hole) ou geram miolos prontos automaticamente no corte.</p>
+            <h2>Catálogo de Peças & Multiplicador Individual</h2>
+            <p class="subtitle">Altere a quantidade desejada direto no card de cada peça usando os botões [-] e [+].</p>
           </div>
         </div>
         <div id="partsGrid" class="parts-grid"></div>

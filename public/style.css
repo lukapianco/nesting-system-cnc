@@ -551,3 +551,177 @@ body {
   background: #f3e8ff;
   border-color: #7e22ce;
 }
+
+/* Adicione ao final do public/style.css */
+.batch-card {
+  background: #fffbeb;
+}
+
+.batch-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 8px;
+}
+
+.batch-header-row h2 {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.batch-total-badge {
+  background: var(--ink);
+  color: var(--primary);
+  font-weight: 900;
+  font-size: 0.78rem;
+  padding: 3px 8px;
+}
+
+.batch-helper {
+  font-size: 0.76rem;
+  color: #334155;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.quick-batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.chip-btn {
+  padding: 5px 9px;
+  border: 2px solid var(--border);
+  background: #ffffff;
+  font-weight: 800;
+  font-size: 0.74rem;
+  cursor: pointer;
+  box-shadow: 2px 2px 0px var(--border);
+}
+
+.chip-btn:hover {
+  background: var(--primary);
+}
+
+.chip-autofill {
+  background: #34d399;
+}
+
+.sidebar-qty-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 210px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.qty-item-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: #ffffff;
+  border: 2px solid var(--border);
+  padding: 6px 8px;
+}
+
+.qty-item-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.qty-item-name {
+  font-weight: 800;
+  font-size: 0.8rem;
+}
+
+.qty-item-dim {
+  font-size: 0.7rem;
+  color: var(--muted);
+  font-family: monospace;
+}
+
+.qty-stepper {
+  display: inline-flex;
+  align-items: center;
+  border: 2px solid var(--border);
+  background: #f8fafc;
+}
+
+.qty-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: var(--primary);
+  font-weight: 900;
+  font-size: 1rem;
+  cursor: pointer;
+  color: var(--ink);
+}
+
+.qty-btn:hover {
+  background: #fbbf24;
+}
+
+.qty-number-input {
+  width: 44px;
+  height: 28px;
+  border: none;
+  border-left: 2px solid var(--border);
+  border-right: 2px solid var(--border);
+  text-align: center;
+  font-weight: 900;
+  font-size: 0.88rem;
+  background: #ffffff;
+}
+
+.canvas-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  background: #f8fafc;
+  border: 2px solid var(--border);
+}
+
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.zoom-hint {
+  font-size: 0.74rem;
+  color: var(--muted);
+  font-weight: 700;
+  margin-left: 6px;
+}
+
+.hover-inspector {
+  font-family: monospace;
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: #0f172a;
+  background: #e0f2fe;
+  padding: 4px 8px;
+  border: 1.5px solid var(--border);
+}
+
+.card-qty-footer {
+  padding: 8px 12px;
+  border-top: 2px solid var(--border);
+  background: #fffbeb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+  font-weight: 800;
+}

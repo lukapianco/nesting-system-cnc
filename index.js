@@ -11,7 +11,7 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({ limit: '30mb' }));
 
 // =========================================================
 // 1. DETECÇÃO DE HARDWARE (CPU CORES & GPU)
@@ -187,12 +187,16 @@ function extractContoursFromDxf(dxf) {
   (dxf.entities || []).forEach((ent, idx) => {
     if ((ent.type === 'LWPOLYLINE' || ent.type === 'POLYLINE') && ent.vertices && ent.vertices.length >= 3) {
       const pts = ent.vertices.map(v => ({ x: v.x, y: v.y }));
+      // Remove último vértice duplicado caso o CAD já tenha repetido o ponto inicial
+      if (pts.length > 3 && Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) < 0.05) {
+        pts.pop();
+      }
       const bbox = getBoundingBox(pts);
       contours.push({ id: `C_${idx}`, points: pts, bbox, trueArea: +(calcPolygonArea(pts)).toFixed(2) || bbox.area });
     } else if (ent.type === 'CIRCLE' && ent.center && ent.radius) {
       const pts = [];
-      for (let i = 0; i < 32; i++) {
-        const ang = (i / 32) * Math.PI * 2;
+      for (let i = 0; i < 36; i++) {
+        const ang = (i / 36) * Math.PI * 2;
         pts.push({ x: ent.center.x + Math.cos(ang) * ent.radius, y: ent.center.y + Math.sin(ang) * ent.radius });
       }
       const bbox = getBoundingBox(pts);
@@ -204,6 +208,9 @@ function extractContoursFromDxf(dxf) {
 
   if (looseLines.length > 0) {
     stitchLinesToPolygons(looseLines).forEach((pts, idx) => {
+      if (pts.length > 3 && Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) < 0.1) {
+        pts.pop();
+      }
       const bbox = getBoundingBox(pts);
       contours.push({ id: `ST_${idx}`, points: pts, bbox, trueArea: +(calcPolygonArea(pts)).toFixed(2) || bbox.area });
     });
@@ -211,7 +218,7 @@ function extractContoursFromDxf(dxf) {
   return contours.filter(c => c.bbox.width > 0.5 && c.bbox.height > 0.5);
 }
 
-// Classifica peças e furos sem duplicar furos como peças externas
+// Classifica peças base (catálogo) e seus furos internos sem duplicar furos como peças externas
 function classifyPartsAndHoles(rawContours, minHoleSize) {
   const sorted = [...rawContours].sort((a, b) => b.bbox.area - a.bbox.area);
   const parentsMap = new Map();
@@ -221,8 +228,8 @@ function classifyPartsAndHoles(rawContours, minHoleSize) {
     for (let j = 0; j < i; j++) {
       const p = sorted[j], c = sorted[i];
       if (
-        c.bbox.minX > p.bbox.minX && c.bbox.maxX < p.bbox.maxX &&
-        c.bbox.minY > p.bbox.minY && c.bbox.maxY < p.bbox.maxY &&
+        c.bbox.minX >= p.bbox.minX - 0.1 && c.bbox.maxX <= p.bbox.maxX + 0.1 &&
+        c.bbox.minY >= p.bbox.minY - 0.1 && c.bbox.maxY <= p.bbox.maxY + 0.1 &&
         isPointInPolygon(c.points[0], p.points)
       ) {
         parentsMap.get(c.id).push(p.id);
@@ -282,7 +289,32 @@ function classifyPartsAndHoles(rawContours, minHoleSize) {
   return parts;
 }
 
-// CORREÇÃO 1: Identifica o contorno externo da Chapa e mapeia TODOS os furos/obstáculos internos da Chapa
+// Expande as peças base de acordo com o Multiplicador de Quantidades definido pelo usuário
+function expandPartsByQuantities(catalogParts, quantitiesMap = {}) {
+  const expanded = [];
+  for (const part of catalogParts) {
+    const qty = Math.max(0, Math.min(500, Number(quantitiesMap[part.id] ?? 1)));
+    for (let c = 1; c <= qty; c++) {
+      const instanceId = qty > 1 ? `${part.id}_COPY_${c}` : part.id;
+      const instanceName = qty > 1 ? `${part.name} (${c}/${qty})` : part.name;
+      expanded.push({
+        ...part,
+        basePartId: part.id,
+        id: instanceId,
+        name: instanceName,
+        copyIndex: c,
+        totalCopies: qty,
+        holes: (part.holes || []).map((h, hIdx) => ({
+          ...h,
+          id: `${h.id}_C${c}_${hIdx}`
+        }))
+      });
+    }
+  }
+  return expanded;
+}
+
+// Extrai o contorno externo da Chapa e mapeia TODOS os furos/obstáculos internos da Chapa
 function buildCustomSheetFromContours(contours) {
   if (!contours || !contours.length) {
     throw new Error('DXF da chapa sem contorno fechado.');
@@ -296,13 +328,12 @@ function buildCustomSheetFromContours(contours) {
     y: +(p.y - outer.bbox.minY).toFixed(2)
   }));
 
-  // Filtra todos os contornos internos contidos dentro do polígono externo da chapa (furos/defeitos/recortes internos)
   const rawObstacles = sorted.slice(1).filter(c => {
     const bboxInside =
-      c.bbox.minX >= outer.bbox.minX &&
-      c.bbox.maxX <= outer.bbox.maxX &&
-      c.bbox.minY >= outer.bbox.minY &&
-      c.bbox.maxY <= outer.bbox.maxY;
+      c.bbox.minX >= outer.bbox.minX - 0.5 &&
+      c.bbox.maxX <= outer.bbox.maxX + 0.5 &&
+      c.bbox.minY >= outer.bbox.minY - 0.5 &&
+      c.bbox.maxY <= outer.bbox.maxY + 0.5;
     return bboxInside && isPointInPolygon(c.points[0], outer.points);
   });
 
@@ -348,7 +379,8 @@ app.post('/api/upload-dxf', upload.single('dxfFile'), (req, res) => {
   try {
     const parser = new DxfParser();
     const contours = extractContoursFromDxf(parser.parseSync(req.file.buffer.toString('utf-8')));
-    res.json({ contours });
+    const catalogParts = classifyPartsAndHoles(contours, 15);
+    res.json({ contours, catalogParts });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -367,11 +399,13 @@ app.post('/api/upload-sheet-dxf', upload.single('sheetDxfFile'), (req, res) => {
 });
 
 app.post('/api/start-job', (req, res) => {
-  const { contours = [], sheet = null, config = {} } = req.body;
-  const parts = classifyPartsAndHoles(contours, Number(config.minHoleSize || 20));
+  const { contours = [], sheet = null, config = {}, quantities = {} } = req.body;
+  const catalogParts = classifyPartsAndHoles(contours, Number(config.minHoleSize || 15));
+  const expandedParts = expandPartsByQuantities(catalogParts, quantities);
   const jobId = `J_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  pendingJobs.set(jobId, { parts, sheet, config });
-  res.json({ jobId, parts });
+
+  pendingJobs.set(jobId, { parts: expandedParts, sheet, config });
+  res.json({ jobId, catalogParts, expandedCount: expandedParts.length });
 });
 
 app.get('/api/stream/:jobId', (req, res) => {
@@ -387,7 +421,7 @@ app.get('/api/stream/:jobId', (req, res) => {
   enqueueJob(job, res);
 });
 
-// GERADOR DE EXEMPLOS (COM FURO/OBSTÁCULO INTERNO NA CHAPA EM DEGRAU)
+// GERADOR DE EXEMPLOS (INCLUINDO AS CHAPAS COM RAMPA E DENTE DAS SUAS IMAGENS!)
 app.get('/api/sample-dxf', (req, res) => {
   const preset = req.query.preset || 'icamento';
   const poly = (pts) => `0\nLWPOLYLINE\n8\n0\n90\n${pts.length}\n70\n1\n` + pts.map(([x, y]) => `10\n${x}\n20\n${y}`).join('\n');
@@ -396,11 +430,22 @@ app.get('/api/sample-dxf', (req, res) => {
 
   let entities = [];
   if (preset === 'sheet_stepped') {
-    // Chapa em formato de Degrau ("L") + 2 Furos/Obstáculos Internos da própria chapa para teste visual de desvio!
     entities = [
       poly([[0, 0], [1200, 0], [1200, 340], [880, 340], [880, 800], [0, 800]]),
-      rect(460, 380, 160, 130), // Obstáculo #1: Recorte retangular interno (160x130mm) no meio da chapa
-      circle(1040, 170, 45)     // Obstáculo #2: Furo circular interno (D=90mm) na aba direita da chapa
+      rect(460, 380, 160, 130),
+      circle(1040, 170, 45)
+    ];
+  } else if (preset === 'sheet_ramp_hole') {
+    // Chapa fora de padrão 2012x691 com rampa diagonal esquerda e furo circular central (igual à sua image_9d3577.png!)
+    entities = [
+      poly([[420, 0], [2012, 0], [1980, 691], [0, 560]]),
+      circle(1190, 360, 176.5)
+    ];
+  } else if (preset === 'sheet_tooth_slot') {
+    // Chapa 722x438 com chanfro direito e rasgo vertical estreito na esquerda (igual à sua image_9d47e2.png!)
+    entities = [
+      poly([[0, 0], [450, 0], [722, 240], [722, 438], [0, 438]]),
+      rect(10, 8, 12, 180)
     ];
   } else if (preset === 'icamento') {
     entities = [
@@ -436,4 +481,4 @@ app.get('/api/sample-dxf', (req, res) => {
   res.send(dxfString);
 });
 
-app.listen(3000, () => console.log(`Servidor Multi-Thread SSE rodando em http://localhost:3000`));
+app.listen(3000, () => console.log(`Servidor V4 Multi-Thread SSE rodando em http://localhost:3000`));
