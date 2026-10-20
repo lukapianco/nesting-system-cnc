@@ -20,7 +20,7 @@ function createSeededRandom(seed) {
 }
 
 // =========================================================================
-// 1. GEOMETRIA COMPUTACIONAL EXATA (PONTO-POLÍGONO, ARESTAS E DISTÂNCIAS)
+// 1. GEOMETRIA COMPUTACIONAL EXATA (PONTO-POLÍGONO, ARESTAS E OBSTÁCULOS)
 // =========================================================================
 
 function isPointInPoly(px, py, pts) {
@@ -34,7 +34,6 @@ function isPointInPoly(px, py, pts) {
   return inside;
 }
 
-// Distância ao quadrado entre um ponto (px, py) e um segmento de reta (x1,y1)-(x2,y2)
 function pointToSegmentDistSq(px, py, x1, y1, x2, y2) {
   const dx = x2 - x1;
   const dy = y2 - y1;
@@ -47,35 +46,86 @@ function pointToSegmentDistSq(px, py, x1, y1, x2, y2) {
   return (px - projX) ** 2 + (py - projY) ** 2;
 }
 
-// Verifica se dois segmentos de reta (a1-a2) e (b1-b2) se cruzam
 function segmentsIntersect(a1, a2, b1, b2) {
   const ccw = (A, B, C) => (C.y - A.y) * (B.x - A.x) > (B.y - A.y) * (C.x - A.x);
   return (ccw(a1, b1, b2) !== ccw(a2, b1, b2)) && (ccw(a1, a2, b1) !== ccw(a1, a2, b2));
 }
 
-// Verifica se todo o polígono da peça (vértices e arestas) está estritamente dentro da Chapa .DXF
-function isPartInsideCustomSheet(x, y, w, h, partPts, sheetPoly, kerf) {
-  if (!sheetPoly || !sheetPoly.length) return true;
+// CORREÇÃO 2: Valida se a peça respeita o contorno externo da chapa E todos os furos/obstáculos internos (sheet.obstacles)
+function isPartInsideCustomSheet(x, y, w, h, partPts, customSheet, kerf) {
+  if (!customSheet || !customSheet.isCustomDxf || !customSheet.points || !customSheet.points.length) {
+    return true;
+  }
 
+  const sheetPoly = customSheet.points;
+  const obstacles = customSheet.obstacles || [];
+  const minGapSq = Math.max(0.1, kerf - 0.2) ** 2;
   const absPts = partPts.map(p => ({ x: x + p.x, y: y + p.y }));
+
+  // a) Todos os vértices e pontos médios devem estar DENTRO de sheet.points e respeitar kerf das bordas
   for (let i = 0; i < absPts.length; i++) {
     const p1 = absPts[i];
     const p2 = absPts[(i + 1) % absPts.length];
+
     if (!isPointInPoly(p1.x, p1.y, sheetPoly)) return false;
-    // Ponto médio da aresta também deve estar dentro da chapa (evita atravessar degrau côncavo)
     if (!isPointInPoly((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5, sheetPoly)) return false;
 
     for (let j = 0; j < sheetPoly.length; j++) {
       const s1 = sheetPoly[j];
       const s2 = sheetPoly[(j + 1) % sheetPoly.length];
       if (segmentsIntersect(p1, p2, s1, s2)) return false;
-      if (pointToSegmentDistSq(p1.x, p1.y, s1.x, s1.y, s2.x, s2.y) < (kerf - 0.2) ** 2) return false;
+      if (pointToSegmentDistSq(p1.x, p1.y, s1.x, s1.y, s2.x, s2.y) < minGapSq) return false;
+      if (pointToSegmentDistSq(s1.x, s1.y, p1.x, p1.y, p2.x, p2.y) < minGapSq) return false;
     }
   }
+
+  // b) Nenhum vértice/aresta da peça pode invadir ou ficar a menos de kerf dos furos da chapa (sheet.obstacles)
+  for (const obs of obstacles) {
+    // Filtro rápido por Bounding Box acrescido de kerf
+    if (
+      x + w + kerf <= obs.minX + 0.05 ||
+      obs.maxX + kerf <= x + 0.05 ||
+      y + h + kerf <= obs.minY + 0.05 ||
+      obs.maxY + kerf <= y + 0.05
+    ) {
+      continue;
+    }
+
+    const obsPts = obs.points;
+
+    // Vértices e pontos médios da peça não podem cair dentro do furo da chapa
+    for (let i = 0; i < absPts.length; i++) {
+      const p1 = absPts[i];
+      const p2 = absPts[(i + 1) % absPts.length];
+      if (isPointInPoly(p1.x, p1.y, obsPts)) return false;
+      if (isPointInPoly((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5, obsPts)) return false;
+    }
+
+    // Vértices e pontos médios do furo da chapa não podem cair dentro da peça (evita que a peça engula o furo)
+    for (let j = 0; j < obsPts.length; j++) {
+      const o1 = obsPts[j];
+      const o2 = obsPts[(j + 1) % obsPts.length];
+      if (isPointInPoly(o1.x, o1.y, absPts)) return false;
+      if (isPointInPoly((o1.x + o2.x) * 0.5, (o1.y + o2.y) * 0.5, absPts)) return false;
+    }
+
+    // Arestas não podem se cruzar nem ficar a menos de kerf
+    for (let i = 0; i < absPts.length; i++) {
+      const p1 = absPts[i];
+      const p2 = absPts[(i + 1) % absPts.length];
+      for (let j = 0; j < obsPts.length; j++) {
+        const o1 = obsPts[j];
+        const o2 = obsPts[(j + 1) % obsPts.length];
+        if (segmentsIntersect(p1, p2, o1, o2)) return false;
+        if (pointToSegmentDistSq(p1.x, p1.y, o1.x, o1.y, o2.x, o2.y) < minGapSq) return false;
+        if (pointToSegmentDistSq(o1.x, o1.y, p1.x, p1.y, p2.x, p2.y) < minGapSq) return false;
+      }
+    }
+  }
+
   return true;
 }
 
-// Colisão True-Shape Completa: Testa AABB, Inclusão de Vértices, Cruzamento de Arestas e Distância Ponto-Segmento
 function polygonsCollideTrueShape(pA, pB, gap) {
   if (
     pA.x + pA.placedWidth + gap <= pB.x + 0.05 ||
@@ -93,7 +143,6 @@ function polygonsCollideTrueShape(pA, pB, gap) {
   const ptsA = pA.placedPoints.map(p => ({ x: pA.x + p.x, y: pA.y + p.y }));
   const ptsB = pB.placedPoints.map(p => ({ x: pB.x + p.x, y: pB.y + p.y }));
 
-  // 1. Verifica vértices e pontos médios das arestas de A dentro de B
   for (let i = 0; i < ptsA.length; i++) {
     const a1 = ptsA[i];
     const a2 = ptsA[(i + 1) % ptsA.length];
@@ -101,7 +150,6 @@ function polygonsCollideTrueShape(pA, pB, gap) {
     if (isPointInPoly((a1.x + a2.x) * 0.5, (a1.y + a2.y) * 0.5, ptsB)) return true;
   }
 
-  // 2. Verifica vértices e pontos médios das arestas de B dentro de A
   for (let j = 0; j < ptsB.length; j++) {
     const b1 = ptsB[j];
     const b2 = ptsB[(j + 1) % ptsB.length];
@@ -109,7 +157,6 @@ function polygonsCollideTrueShape(pA, pB, gap) {
     if (isPointInPoly((b1.x + b2.x) * 0.5, (b1.y + b2.y) * 0.5, ptsA)) return true;
   }
 
-  // 3. Verifica cruzamento de segmentos (arestas em "T" ou "+") e distância mínima (gap/Kerf) entre quinas e paredes
   const minGapSq = Math.max(0.1, gap - 0.15) ** 2;
   for (let i = 0; i < ptsA.length; i++) {
     const a1 = ptsA[i];
@@ -126,8 +173,6 @@ function polygonsCollideTrueShape(pA, pB, gap) {
   return false;
 }
 
-// Decompõe peças côncavas ortogonais (ex.: Peças em "L" de 6 vértices) em retângulos sólidos exatos
-// Isso libera o vão vazio do "L" no MaxRects sem permitir que outras peças invadam as pernas do "L"!
 function getSolidBoxesForPart(placedPart, gap) {
   const pts = placedPart.placedPoints;
   if (pts.length === 6 && Math.abs(placedPart.area - placedPart.bboxArea) > 10) {
@@ -193,6 +238,126 @@ function subtractBoxFromFreeRects(freeRects, box) {
 }
 
 // =========================================================================
+// CORREÇÃO 3: DECOMPOSIÇÃO INICIAL DO FREERECTS DA CHAPA CUSTOMIZADA (.DXF)
+// Funciona para qualquer formato (L, U, T, chanfrado) e subtrai todos os furos da chapa
+// =========================================================================
+
+function buildInitialFreeRectsForSheet(sheetW, sheetH, customSheet, kerf) {
+  let freeRects = [{ x: kerf, y: kerf, width: sheetW - kerf * 2, height: sheetH - kerf * 2 }];
+
+  if (!customSheet || !customSheet.isCustomDxf || !customSheet.points || !customSheet.points.length) {
+    return freeRects;
+  }
+
+  const sheetPoly = customSheet.points;
+  const obstacles = customSheet.obstacles || [];
+
+  // 1. Subtrai as Bounding Boxes (acrescidas de kerf) de todos os furos internos da chapa (sheet.obstacles)
+  for (const obs of obstacles) {
+    freeRects = subtractBoxFromFreeRects(freeRects, {
+      x: obs.minX - kerf,
+      y: obs.minY - kerf,
+      width: obs.width + kerf * 2,
+      height: obs.height + kerf * 2
+    });
+  }
+
+  // 2. Varredura de grade/células externas ao polígono sheet.points (qualquer formato: L, U, T, degraus, chanfros)
+  const xSet = new Set([0, sheetW]);
+  const ySet = new Set([0, sheetH]);
+
+  // Inclui todas as coordenadas de vértices do polígono externo da chapa para precisão exata em degraus ortogonais
+  for (const pt of sheetPoly) {
+    xSet.add(Math.max(0, Math.min(sheetW, +pt.x.toFixed(1))));
+    ySet.add(Math.max(0, Math.min(sheetH, +pt.y.toFixed(1))));
+  }
+
+  // Adiciona subdivisão de grade para capturar chanfros diagonais ou curvas externas
+  const gridCols = 16;
+  const gridRows = 12;
+  for (let i = 1; i < gridCols; i++) xSet.add(+((sheetW * i) / gridCols).toFixed(1));
+  for (let j = 1; j < gridRows; j++) ySet.add(+((sheetH * j) / gridRows).toFixed(1));
+
+  const xs = [...xSet].sort((a, b) => a - b);
+  const ys = [...ySet].sort((a, b) => a - b);
+
+  // Agrupa células externas contíguas em cada linha (Run-Length Encoding horizontal)
+  let activeOutsideBands = [];
+  const mergedOutsideBoxes = [];
+
+  for (let iy = 0; iy < ys.length - 1; iy++) {
+    const y0 = ys[iy], y1 = ys[iy + 1];
+    if (y1 - y0 < 0.5) continue;
+    const cy = (y0 + y1) * 0.5;
+
+    const rowSpans = [];
+    let currentSpan = null;
+
+    for (let ix = 0; ix < xs.length - 1; ix++) {
+      const x0 = xs[ix], x1 = xs[ix + 1];
+      if (x1 - x0 < 0.5) continue;
+      const cx = (x0 + x1) * 0.5;
+
+      const isOutside = !isPointInPoly(cx, cy, sheetPoly);
+      if (isOutside) {
+        if (currentSpan && Math.abs(currentSpan.x1 - x0) < 0.1) {
+          currentSpan.x1 = x1;
+        } else {
+          if (currentSpan) rowSpans.push(currentSpan);
+          currentSpan = { x0, x1, y0, y1 };
+        }
+      } else if (currentSpan) {
+        rowSpans.push(currentSpan);
+        currentSpan = null;
+      }
+    }
+    if (currentSpan) rowSpans.push(currentSpan);
+
+    // Mescla verticalmente faixas externas idênticas entre linhas adjacentes
+    const nextBands = [];
+    for (const span of rowSpans) {
+      const matchIdx = activeOutsideBands.findIndex(
+        b => Math.abs(b.x0 - span.x0) < 0.1 && Math.abs(b.x1 - span.x1) < 0.1 && Math.abs(b.y1 - span.y0) < 0.1
+      );
+      if (matchIdx !== -1) {
+        const matched = activeOutsideBands[matchIdx];
+        matched.y1 = span.y1;
+        nextBands.push(matched);
+        activeOutsideBands.splice(matchIdx, 1);
+      } else {
+        nextBands.push(span);
+      }
+    }
+
+    for (const finished of activeOutsideBands) {
+      mergedOutsideBoxes.push(finished);
+    }
+    activeOutsideBands = nextBands;
+  }
+
+  for (const finished of activeOutsideBands) {
+    mergedOutsideBoxes.push(finished);
+  }
+
+  // Subtrai todas as caixas vazias externas (acrescidas de kerf) do freeRects inicial
+  for (const outBox of mergedOutsideBoxes) {
+    freeRects = subtractBoxFromFreeRects(freeRects, {
+      x: outBox.x0 - kerf,
+      y: outBox.y0 - kerf,
+      width: (outBox.x1 - outBox.x0) + kerf * 2,
+      height: (outBox.y1 - outBox.y0) + kerf * 2
+    });
+  }
+
+  return freeRects;
+}
+
+// Pré-calcula as ilhas livres iniciais da chapa uma única vez para máxima velocidade nas 20.000+ iterações
+const SHEET_W = sheet?.isCustomDxf ? sheet.width : Number(config.sheetWidth);
+const SHEET_H = sheet?.isCustomDxf ? sheet.height : Number(config.sheetHeight);
+const BASE_SHEET_FREE_RECTS = buildInitialFreeRectsForSheet(SHEET_W, SHEET_H, sheet, Number(config.kerf));
+
+// =========================================================================
 // 2. NESTING IN-HOLE (COM ROTAÇÃO SINCRONIZADA DE 90° JUNTO COM A PEÇA MÃE)
 // =========================================================================
 
@@ -235,7 +400,6 @@ function tryNestingInHoles(orderedParts, kerf, allowRotation, enableInHole) {
             ...candidate,
             inHoleParentId: hostPart.id,
             inHoleId: hole.id,
-            // Posição e geometria no referencial NÃO rotacionado (0°) da peça mãe
             relXInHost: +(hole.relX + (hole.width - cw) / 2).toFixed(2),
             relYInHost: +(hole.relY + (hole.height - ch) / 2).toFixed(2),
             basePlacedWidth: cw,
@@ -255,10 +419,10 @@ function tryNestingInHoles(orderedParts, kerf, allowRotation, enableInHole) {
 }
 
 // =========================================================================
-// 3. COMPACTAÇÃO TRUE-SHAPE + EXTRAÇÃO DE RETALHOS
+// CORREÇÃO 4: COMPACTAÇÃO GRAVITACIONAL E EXTRAÇÃO DE RETALHOS RESPEITANDO FUROS DA CHAPA
 // =========================================================================
 
-function compactTrueShapeAndCommonLine(placedParts, sheetPoly, kerf, commonLineEnabled, laserBeamWidth, gravityMode) {
+function compactTrueShapeAndCommonLine(placedParts, customSheet, kerf, commonLineEnabled, laserBeamWidth, gravityMode) {
   const effectiveGap = commonLineEnabled ? Number(laserBeamWidth || 0.4) : kerf;
 
   for (let pass = 0; pass < 3; pass++) {
@@ -268,8 +432,9 @@ function compactTrueShapeAndCommonLine(placedParts, sheetPoly, kerf, commonLineE
         for (const step of [8, 2]) {
           while (part[axis] - step >= kerf) {
             part[axis] -= step;
+            // Respeita tanto o contorno externo quanto os furos/obstáculos internos da chapa a kerf mm
             const insideSheet = isPartInsideCustomSheet(
-              part.x, part.y, part.placedWidth, part.placedHeight, part.placedPoints, sheetPoly, kerf
+              part.x, part.y, part.placedWidth, part.placedHeight, part.placedPoints, customSheet, kerf
             );
             const collides = !insideSheet || placedParts.some(
               o => o.id !== part.id && polygonsCollideTrueShape(part, o, effectiveGap)
@@ -291,14 +456,22 @@ function compactTrueShapeAndCommonLine(placedParts, sheetPoly, kerf, commonLineE
   }
 }
 
-function isRectStrictlyInsideSheet(r, sheetPoly) {
-  if (!sheetPoly || !sheetPoly.length) return true;
+function isRectStrictlyInsideSheet(r, customSheet) {
+  if (!customSheet || !customSheet.isCustomDxf || !customSheet.points || !customSheet.points.length) {
+    return true;
+  }
+
+  const sheetPoly = customSheet.points;
+  const obstacles = customSheet.obstacles || [];
+
   const corners = [
     { x: r.x + 1, y: r.y + 1 },
     { x: r.x + r.width - 1, y: r.y + 1 },
     { x: r.x + r.width - 1, y: r.y + r.height - 1 },
     { x: r.x + 1, y: r.y + r.height - 1 }
   ];
+
+  // 1. Verifica se o retalho está estritamente dentro do contorno externo da chapa
   for (const c of corners) {
     if (!isPointInPoly(c.x, c.y, sheetPoly)) return false;
   }
@@ -309,33 +482,42 @@ function isRectStrictlyInsideSheet(r, sheetPoly) {
       if (segmentsIntersect(c1, c2, sheetPoly[j], sheetPoly[(j + 1) % sheetPoly.length])) return false;
     }
   }
-  return true;
-}
 
-function extractStandardRemnants(placedParts, sheetW, sheetH, sheetPoly, kerf, minRemnantSize) {
-  let freeRects = [{ x: kerf, y: kerf, width: sheetW - kerf * 2, height: sheetH - kerf * 2 }];
+  // 2. Garante que o retalho NUNCA se sobreponha ou cruze qualquer furo interno da chapa (sheet.obstacles)
+  for (const obs of obstacles) {
+    if (
+      r.x + r.width <= obs.minX + 0.5 ||
+      obs.maxX <= r.x + 0.5 ||
+      r.y + r.height <= obs.minY + 0.5 ||
+      obs.maxY <= r.y + 0.5
+    ) {
+      continue;
+    }
 
-  // Se a chapa possuir recorte (ex.: chapa em degrau L), subtrai a caixa do degrau vazio para fatiar retalhos exatos
-  if (sheetPoly && sheetPoly.length === 6) {
-    const xs = [...new Set(sheetPoly.map(p => +p.x.toFixed(1)))].sort((a, b) => a - b);
-    const ys = [...new Set(sheetPoly.map(p => +p.y.toFixed(1)))].sort((a, b) => a - b);
-    if (xs.length === 3 && ys.length === 3) {
-      for (let ix = 0; ix < 2; ix++) {
-        for (let iy = 0; iy < 2; iy++) {
-          const cx = (xs[ix] + xs[ix + 1]) * 0.5;
-          const cy = (ys[iy] + ys[iy + 1]) * 0.5;
-          if (!isPointInPoly(cx, cy, sheetPoly)) {
-            freeRects = subtractBoxFromFreeRects(freeRects, {
-              x: xs[ix] - kerf,
-              y: ys[iy] - kerf,
-              width: (xs[ix + 1] - xs[ix]) + kerf * 2,
-              height: (ys[iy + 1] - ys[iy]) + kerf * 2
-            });
-          }
-        }
+    const obsPts = obs.points;
+    for (const c of corners) {
+      if (isPointInPoly(c.x, c.y, obsPts)) return false;
+    }
+    for (const op of obsPts) {
+      if (op.x > r.x + 0.5 && op.x < r.x + r.width - 0.5 && op.y > r.y + 0.5 && op.y < r.y + r.height - 0.5) {
+        return false;
+      }
+    }
+    for (let i = 0; i < 4; i++) {
+      const c1 = corners[i], c2 = corners[(i + 1) % 4];
+      if (isPointInPoly((c1.x + c2.x) * 0.5, (c1.y + c2.y) * 0.5, obsPts)) return false;
+      for (let j = 0; j < obsPts.length; j++) {
+        if (segmentsIntersect(c1, c2, obsPts[j], obsPts[(j + 1) % obsPts.length])) return false;
       }
     }
   }
+
+  return true;
+}
+
+function extractStandardRemnants(placedParts, customSheet, kerf, minRemnantSize) {
+  // Parte das ilhas livres já descontando recortes externos e furos internos da chapa
+  let freeRects = BASE_SHEET_FREE_RECTS.map(r => ({ ...r }));
 
   for (const p of placedParts) {
     if (p.nestedInsideHole) continue;
@@ -348,7 +530,7 @@ function extractStandardRemnants(placedParts, sheetW, sheetH, sheetPoly, kerf, m
   const remnants = [];
   while (true) {
     const valid = freeRects.filter(
-      r => r.width >= minRemnantSize && r.height >= minRemnantSize && isRectStrictlyInsideSheet(r, sheetPoly)
+      r => r.width >= minRemnantSize && r.height >= minRemnantSize && isRectStrictlyInsideSheet(r, customSheet)
     );
     if (!valid.length) break;
     valid.sort((a, b) => (b.width * b.height) - (a.width * a.height));
@@ -377,9 +559,10 @@ function extractStandardRemnants(placedParts, sheetW, sheetH, sheetPoly, kerf, m
 // =========================================================================
 
 function evaluateCandidate(orderedParts, heuristic, forcedRotations, gravityMode) {
-  const sheetW = sheet?.isCustomDxf ? sheet.width : Number(config.sheetWidth);
-  const sheetH = sheet?.isCustomDxf ? sheet.height : Number(config.sheetHeight);
+  const sheetW = SHEET_W;
+  const sheetH = SHEET_H;
   const sheetPoly = sheet?.isCustomDxf ? sheet.points : null;
+  const sheetObstacles = sheet?.isCustomDxf ? (sheet.obstacles || []) : [];
   const kerf = Number(config.kerf);
   const effectiveGap = config.commonLine ? Number(config.laserBeamWidth || 0.4) : kerf;
 
@@ -390,7 +573,8 @@ function evaluateCandidate(orderedParts, heuristic, forcedRotations, gravityMode
     config.enableInHole !== false
   );
 
-  let freeRects = [{ x: kerf, y: kerf, width: sheetW - kerf * 2, height: sheetH - kerf * 2 }];
+  // Inicia o freeRects já com os furos internos e recortes côncavos da chapa subtraídos!
+  let freeRects = BASE_SHEET_FREE_RECTS.map(r => ({ ...r }));
   const placedParts = [];
   const unplacedParts = [];
 
@@ -414,9 +598,8 @@ function evaluateCandidate(orderedParts, heuristic, forcedRotations, gravityMode
           const transformPts = (pts) => pts.map(p => rot ? ({ x: p.y, y: part.width - p.x }) : ({ x: p.x, y: p.y }));
           const candPts = transformPts(part.points);
 
-          if (!isPartInsideCustomSheet(rect.x, rect.y, w, h, candPts, sheetPoly, kerf)) continue;
+          if (!isPartInsideCustomSheet(rect.x, rect.y, w, h, candPts, sheet, kerf)) continue;
 
-          // Verifica colisão True-Shape com peças já posicionadas
           const tempPart = {
             id: part.id,
             x: rect.x,
@@ -463,7 +646,6 @@ function evaluateCandidate(orderedParts, heuristic, forcedRotations, gravityMode
       };
       placedParts.push(hostPlaced);
 
-      // Subtrai apenas as caixas sólidas reais (liberando o vão interno de peças em "L"!)
       const solidBoxes = getSolidBoxesForPart(hostPlaced, effectiveGap);
       for (const sBox of solidBoxes) {
         freeRects = subtractBoxFromFreeRects(freeRects, sBox);
@@ -475,14 +657,13 @@ function evaluateCandidate(orderedParts, heuristic, forcedRotations, gravityMode
 
   compactTrueShapeAndCommonLine(
     placedParts,
-    sheetPoly,
+    sheet,
     kerf,
     Boolean(config.commonLine),
     Number(config.laserBeamWidth || 0.4),
     gravityMode
   );
 
-  // CORREÇÃO DEFINITIVA: Quando a peça mãe (host) gira 90°, a peça filha (In-Hole) gira 90° junto com o furo!
   let inHoleCount = 0;
   const finalAllPlaced = [...placedParts];
 
@@ -493,7 +674,6 @@ function evaluateCandidate(orderedParts, heuristic, forcedRotations, gravityMode
         let cx, cy, finalW, finalH, finalRot, finalPts, finalHoles;
 
         if (host.rotated) {
-          // Host girou 90° via (x, y) -> (y, host.width - x): gira a peça filha sincronizadamente!
           const rotRelX = child.relYInHost;
           const rotRelY = host.width - (child.relXInHost + child.basePlacedWidth);
           cx = host.x + rotRelX;
@@ -545,7 +725,7 @@ function evaluateCandidate(orderedParts, heuristic, forcedRotations, gravityMode
     if (p.y + p.placedHeight + kerf > maxY) maxY = p.y + p.placedHeight + kerf;
   }
 
-  const remnants = extractStandardRemnants(placedParts, sheetW, sheetH, sheetPoly, kerf, Number(config.minRemnantSize));
+  const remnants = extractStandardRemnants(placedParts, sheet, kerf, Number(config.minRemnantSize));
   const sheetArea = sheet?.isCustomDxf ? sheet.area : (sheetW * sheetH);
   const usedArea = finalAllPlaced.reduce((acc, p) => acc + p.area, 0);
   const remnantArea = remnants.reduce((acc, r) => acc + r.area, 0);
@@ -561,6 +741,7 @@ function evaluateCandidate(orderedParts, heuristic, forcedRotations, gravityMode
     sheetWidth: sheetW,
     sheetHeight: sheetH,
     sheetPoly,
+    sheetObstacles,
     kerf,
     commonLine: Boolean(config.commonLine),
     rawUtilization,
@@ -602,7 +783,7 @@ function isBetter(cand, best, goal) {
 // =========================================================================
 
 function runOptimizationLoop() {
-  const totalIterations = Math.max(50, Math.min(2000000, Number(config.totalIterations) || 20000));
+  const totalIterations = Math.max(50, Math.min(200000, Number(config.totalIterations) || 20000));
   const startTime = Date.now();
   const rng = createSeededRandom(Number(config.sheetWidth) * 31 + Number(config.sheetHeight) * 17 + (config.seedOffset || 1));
 

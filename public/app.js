@@ -70,13 +70,14 @@ dxfInput.addEventListener('change', async (e) => {
 sheetDxfInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
-  sheetFileNameLabel.textContent = `Chapa DXF: ${file.name}`;
   const fd = new FormData();
   fd.append('sheetDxfFile', file);
   const res = await fetch('/api/upload-sheet-dxf', { method: 'POST', body: fd });
   const data = await res.json();
   if (data.sheet) {
     customSheetDxf = data.sheet;
+    const obsCount = (customSheetDxf.obstacles || []).length;
+    sheetFileNameLabel.textContent = `Chapa DXF: ${file.name} (${obsCount} furo(s) interno(s))`;
     sheetWidthInput.value = Math.round(customSheetDxf.width);
     sheetHeightInput.value = Math.round(customSheetDxf.height);
     btnClearCustomSheet.classList.remove('hidden');
@@ -91,17 +92,18 @@ btnClearCustomSheet.addEventListener('click', () => {
   startBackendSseOptimization();
 });
 
-// Botão para carregar o formato exato da Chapa desenhada na sua image_e625a3.png
+// Carrega o preset de Chapa em Degrau ("L") com 2 furos/recortes internos para teste visual imediato
 btnLoadSteppedSheet.addEventListener('click', async () => {
   const dxfRes = await fetch('/api/sample-dxf?preset=sheet_stepped');
   const blob = await dxfRes.blob();
-  const file = new File([blob], 'chapa_degrau_customizada.dxf');
-  sheetFileNameLabel.textContent = 'Chapa DXF: Formato em Degrau (Sua Imagem)';
+  const file = new File([blob], 'chapa_degrau_com_furos.dxf');
   const fd = new FormData();
   fd.append('sheetDxfFile', file);
   const res = await fetch('/api/upload-sheet-dxf', { method: 'POST', body: fd });
   const data = await res.json();
   customSheetDxf = data.sheet;
+  const obsCount = (customSheetDxf.obstacles || []).length;
+  sheetFileNameLabel.textContent = `Chapa DXF: Degrau L + ${obsCount} Furos Internos`;
   sheetWidthInput.value = Math.round(customSheetDxf.width);
   sheetHeightInput.value = Math.round(customSheetDxf.height);
   btnClearCustomSheet.classList.remove('hidden');
@@ -240,7 +242,7 @@ async function startBackendSseOptimization() {
   };
 }
 
-// 3. RENDERIZAÇÃO DA CHAPA (RETANGULAR OU .DXF CUSTOMIZADA) E PEÇAS IN-HOLE
+// 3. RENDERIZAÇÃO DA CHAPA, OBSTÁCULOS DA CHAPA, RETALHOS E PEÇAS
 function drawPolygon(context, points, offsetX, offsetY, scale) {
   if (!points || !points.length) return;
   context.beginPath();
@@ -265,7 +267,7 @@ function drawSheetNesting(nesting, isHighlight = false) {
 
   ctx.clearRect(0, 0, nestingCanvas.width, nestingCanvas.height);
 
-  // Desenha o Polígono da Chapa (.DXF customizado ou Retângulo)
+  // Desenha o Polígono Externo da Chapa (.DXF customizado ou Retângulo)
   ctx.save();
   if (nesting.sheetPoly && nesting.sheetPoly.length > 0) {
     drawPolygon(ctx, nesting.sheetPoly, startX, startY, scale);
@@ -286,6 +288,31 @@ function drawSheetNesting(nesting, isHighlight = false) {
   }
   for (let y = 0; y <= nesting.sheetHeight; y += stepGrid) {
     ctx.beginPath(); ctx.moveTo(startX, startY + y * scale); ctx.lineTo(startX + drawW, startY + y * scale); ctx.stroke();
+  }
+
+  // CORREÇÃO 5A: Desenha todos os Furos/Obstáculos internos da Chapa Principal (Zonas Proibidas)
+  if (nesting.sheetObstacles && nesting.sheetObstacles.length > 0) {
+    nesting.sheetObstacles.forEach((obs) => {
+      drawPolygon(ctx, obs.points, startX, startY, scale);
+      ctx.fillStyle = '#0f172a';
+      ctx.fill();
+
+      ctx.strokeStyle = '#f97316';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      const ocx = startX + (obs.minX + obs.width / 2) * scale;
+      const ocy = startY + (obs.minY + obs.height / 2) * scale;
+      ctx.fillStyle = '#fdba74';
+      ctx.font = 'bold 9.5px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Furo/Recorte da Chapa', ocx, ocy - 2);
+      ctx.font = '9px monospace';
+      ctx.fillText(`${Math.round(obs.width)}x${Math.round(obs.height)}mm`, ocx, ocy + 9);
+      ctx.textAlign = 'left';
+    });
   }
 
   // Retalhos padronizados da chapa
@@ -360,7 +387,7 @@ function drawSheetNesting(nesting, isHighlight = false) {
 function updateMetrics(parts, nesting) {
   document.getElementById('kpiUtilization').textContent = `${nesting.compactUtilization}%`;
   document.getElementById('kpiRawRatio').textContent =
-    `Bruto na chapa: ${nesting.rawUtilization}% | ${nesting.commonLine ? 'Corte Comum Ativo' : `Kerf: ${nesting.kerf}mm`}`;
+    `Bruto na chapa líquida: ${nesting.rawUtilization}% | ${nesting.commonLine ? 'Corte Comum Ativo' : `Kerf: ${nesting.kerf}mm`}`;
   document.getElementById('metricSheetArea').textContent = `${(nesting.sheetArea / 100).toFixed(1)} cm²`;
   document.getElementById('metricUsedArea').textContent = `${(nesting.usedArea / 100).toFixed(1)} cm²`;
   document.getElementById('metricPlacedCount').textContent = `${nesting.placedParts.length} / ${parts.length}`;
@@ -368,8 +395,18 @@ function updateMetrics(parts, nesting) {
     `${(nesting.remnantArea / 100).toFixed(1)} cm² (${nesting.remnants.length} retalhos)`;
   document.getElementById('metricInHoleParts').textContent = nesting.inHoleCount || 0;
   document.getElementById('metricFreeSlugs').textContent = `${nesting.freeHoleSlugsCount || 0} (Custo Zero)`;
+
+  const obsCount = (nesting.sheetObstacles || []).length;
   document.getElementById('sheetSpecText').textContent =
-    `Chapa: ${nesting.sheetWidth}x${nesting.sheetHeight}mm ${nesting.sheetPoly ? '(Formato DXF Customizado)' : ''}`;
+    `Chapa: ${nesting.sheetWidth}x${nesting.sheetHeight}mm ${nesting.sheetPoly ? `(DXF Customizado c/ ${obsCount} furo(s)/recorte(s) interno(s))` : ''}`;
+
+  const alertBox = document.getElementById('unplacedAlert');
+  if (nesting.unplacedParts && nesting.unplacedParts.length > 0) {
+    alertBox.classList.remove('hidden');
+    alertBox.textContent = `Atenção: ${nesting.unplacedParts.length} peça(s) não couberam na área líquida disponível da chapa.`;
+  } else {
+    alertBox.classList.add('hidden');
+  }
 }
 
 function renderArchiveButtons(archive, active) {
@@ -434,7 +471,7 @@ function renderSeparatedParts(parts) {
   });
 }
 
-// 4. EXPORTAÇÃO .DXF FINAL
+// 4. EXPORTAÇÃO .DXF FINAL (INCLUINDO CAMADA DE OBSTÁCULOS DA CHAPA)
 function buildLwPoly(pts, layer, color) {
   const v = pts.map(p => `10\n${(+p.x).toFixed(3)}\n20\n${(+p.y).toFixed(3)}`).join('\n');
   return `0\nLWPOLYLINE\n8\n${layer}\n62\n${color}\n90\n${pts.length}\n70\n1\n${v}`;
@@ -447,9 +484,18 @@ btnExportDxf.addEventListener('click', () => {
   const toCad = (pts, ox, oy) => pts.map(p => ({ x: ox + p.x, y: H - (oy + p.y) }));
   const ents = [];
 
+  // Camada 0: Contorno Externo da Chapa
   const sheetPts = n.sheetPoly || [{ x: 0, y: 0 }, { x: n.sheetWidth, y: 0 }, { x: n.sheetWidth, y: H }, { x: 0, y: H }];
   ents.push(buildLwPoly(toCad(sheetPts, 0, 0), '0_CHAPA_LIMITE', 7));
 
+  // CORREÇÃO 5B: Camada de Furos/Obstáculos Internos da Chapa Principal
+  if (n.sheetObstacles && n.sheetObstacles.length > 0) {
+    n.sheetObstacles.forEach(obs => {
+      ents.push(buildLwPoly(toCad(obs.points, 0, 0), '0_CHAPA_FUROS_OBSTACULOS', 30));
+    });
+  }
+
+  // Camadas 1 e 2: Peças Alocadas e Furos das Peças
   n.placedParts.forEach(p => {
     ents.push(buildLwPoly(toCad(p.placedPoints, p.x, p.y), p.nestedInsideHole ? '1_PECA_IN_HOLE' : '1_CORTE_PECAS', p.nestedInsideHole ? 3 : 5));
     (p.placedHoles || []).forEach(h => {
@@ -457,6 +503,7 @@ btnExportDxf.addEventListener('click', () => {
     });
   });
 
+  // Camada 3: Retalhos Úteis da Chapa
   if (exportIncludeRemnantsInput.checked && n.remnants) {
     n.remnants.forEach(r => {
       ents.push(buildLwPoly(toCad([{ x: 0, y: 0 }, { x: r.width, y: 0 }, { x: r.width, y: r.height }, { x: 0, y: r.height }], r.x, r.y), '3_RETALHOS_UTEIS', 6));

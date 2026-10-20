@@ -13,7 +13,9 @@ const upload = multer({ storage: multer.memoryStorage() });
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json({ limit: '25mb' }));
 
+// =========================================================
 // 1. DETECÇÃO DE HARDWARE (CPU CORES & GPU)
+// =========================================================
 function detectHardware() {
   const cpus = os.cpus() || [];
   const totalCores = cpus.length || 2;
@@ -41,7 +43,9 @@ let activeWorkers = 0;
 const jobQueue = [];
 const pendingJobs = new Map();
 
+// =========================================================
 // 2. POOL DE WORKER_THREADS COM FILA PARA ESCALABILIDADE NA VPS
+// =========================================================
 function enqueueJob(job, res) {
   job.res = res;
   job.aborted = false;
@@ -110,7 +114,9 @@ function checkQueue() {
   }
 }
 
-// 3. GEOMETRIA E PARSER DXF
+// =========================================================
+// 3. GEOMETRIA E PARSER DXF (PEÇAS E CHAPAS CUSTOMIZADAS)
+// =========================================================
 function getBoundingBox(pts) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of pts) {
@@ -205,7 +211,7 @@ function extractContoursFromDxf(dxf) {
   return contours.filter(c => c.bbox.width > 0.5 && c.bbox.height > 0.5);
 }
 
-// CLASSIFICAÇÃO CORRIGIDA: Furos NUNCA são duplicados como peças externas!
+// Classifica peças e furos sem duplicar furos como peças externas
 function classifyPartsAndHoles(rawContours, minHoleSize) {
   const sorted = [...rawContours].sort((a, b) => b.bbox.area - a.bbox.area);
   const parentsMap = new Map();
@@ -268,7 +274,7 @@ function classifyPartsAndHoles(rawContours, minHoleSize) {
       area: c.trueArea,
       relX: hb.minX,
       relY: hb.minY,
-      usableHole: meetsMin, // Pode receber peça menor lá dentro (In-Hole) ou fornecer seu miolo gratuitamente!
+      usableHole: meetsMin,
       points: relPts
     });
   });
@@ -276,7 +282,66 @@ function classifyPartsAndHoles(rawContours, minHoleSize) {
   return parts;
 }
 
+// CORREÇÃO 1: Identifica o contorno externo da Chapa e mapeia TODOS os furos/obstáculos internos da Chapa
+function buildCustomSheetFromContours(contours) {
+  if (!contours || !contours.length) {
+    throw new Error('DXF da chapa sem contorno fechado.');
+  }
+
+  const sorted = [...contours].sort((a, b) => b.bbox.area - a.bbox.area);
+  const outer = sorted[0];
+
+  const normPts = outer.points.map(p => ({
+    x: +(p.x - outer.bbox.minX).toFixed(2),
+    y: +(p.y - outer.bbox.minY).toFixed(2)
+  }));
+
+  // Filtra todos os contornos internos contidos dentro do polígono externo da chapa (furos/defeitos/recortes internos)
+  const rawObstacles = sorted.slice(1).filter(c => {
+    const bboxInside =
+      c.bbox.minX >= outer.bbox.minX &&
+      c.bbox.maxX <= outer.bbox.maxX &&
+      c.bbox.minY >= outer.bbox.minY &&
+      c.bbox.maxY <= outer.bbox.maxY;
+    return bboxInside && isPointInPolygon(c.points[0], outer.points);
+  });
+
+  const normObstacles = rawObstacles.map((obs, idx) => {
+    const pts = obs.points.map(p => ({
+      x: +(p.x - outer.bbox.minX).toFixed(2),
+      y: +(p.y - outer.bbox.minY).toFixed(2)
+    }));
+    const obBbox = getBoundingBox(pts);
+    return {
+      id: `OBS_CHAPA_${idx + 1}`,
+      name: `Furo/Recorte da Chapa #${idx + 1}`,
+      minX: obBbox.minX,
+      minY: obBbox.minY,
+      maxX: obBbox.maxX,
+      maxY: obBbox.maxY,
+      width: obBbox.width,
+      height: obBbox.height,
+      area: obs.trueArea,
+      points: pts
+    };
+  });
+
+  const obstaclesAreaSum = normObstacles.reduce((acc, o) => acc + o.area, 0);
+  const netArea = Math.max(1, +(outer.trueArea - obstaclesAreaSum).toFixed(2));
+
+  return {
+    isCustomDxf: true,
+    width: outer.bbox.width,
+    height: outer.bbox.height,
+    area: netArea,
+    points: normPts,
+    obstacles: normObstacles
+  };
+}
+
+// =========================================================
 // 4. ROTAS HTTP + STREAM SSE
+// =========================================================
 app.get('/api/hardware', (req, res) => res.json({ ...HARDWARE, activeWorkers, queueSize: jobQueue.length }));
 
 app.post('/api/upload-dxf', upload.single('dxfFile'), (req, res) => {
@@ -291,24 +356,11 @@ app.post('/api/upload-dxf', upload.single('dxfFile'), (req, res) => {
 
 app.post('/api/upload-sheet-dxf', upload.single('sheetDxfFile'), (req, res) => {
   try {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo DXF de chapa enviado.' });
     const parser = new DxfParser();
     const contours = extractContoursFromDxf(parser.parseSync(req.file.buffer.toString('utf-8')));
-    if (!contours.length) throw new Error('DXF da chapa sem contorno fechado.');
-    contours.sort((a, b) => b.bbox.area - a.bbox.area);
-    const outer = contours[0];
-    const normPts = outer.points.map(p => ({
-      x: +(p.x - outer.bbox.minX).toFixed(2),
-      y: +(p.y - outer.bbox.minY).toFixed(2)
-    }));
-    res.json({
-      sheet: {
-        isCustomDxf: true,
-        width: outer.bbox.width,
-        height: outer.bbox.height,
-        area: outer.trueArea,
-        points: normPts
-      }
-    });
+    const sheet = buildCustomSheetFromContours(contours);
+    res.json({ sheet });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -335,7 +387,7 @@ app.get('/api/stream/:jobId', (req, res) => {
   enqueueJob(job, res);
 });
 
-// GERADOR DE EXEMPLOS (INCLUINDO CHAPA EM DEGRAU DA SUA IMAGEM E OLHAL DE IÇAMENTO)
+// GERADOR DE EXEMPLOS (COM FURO/OBSTÁCULO INTERNO NA CHAPA EM DEGRAU)
 app.get('/api/sample-dxf', (req, res) => {
   const preset = req.query.preset || 'icamento';
   const poly = (pts) => `0\nLWPOLYLINE\n8\n0\n90\n${pts.length}\n70\n1\n` + pts.map(([x, y]) => `10\n${x}\n20\n${y}`).join('\n');
@@ -344,37 +396,37 @@ app.get('/api/sample-dxf', (req, res) => {
 
   let entities = [];
   if (preset === 'sheet_stepped') {
-    // Exatamente o formato da Chapa Principal que você desenhou na image_e625a3.png!
-    entities = [poly([[0, 0], [1200, 0], [1200, 340], [880, 340], [880, 800], [0, 800]])];
+    // Chapa em formato de Degrau ("L") + 2 Furos/Obstáculos Internos da própria chapa para teste visual de desvio!
+    entities = [
+      poly([[0, 0], [1200, 0], [1200, 340], [880, 340], [880, 800], [0, 800]]),
+      rect(460, 380, 160, 130), // Obstáculo #1: Recorte retangular interno (160x130mm) no meio da chapa
+      circle(1040, 170, 45)     // Obstáculo #2: Furo circular interno (D=90mm) na aba direita da chapa
+    ];
   } else if (preset === 'icamento') {
-    // Olhal de Içamento Chanfrado igual à sua image_e625a6.png + Buchas menores p/ demonstrar In-Hole e True-Shape
     entities = [
       poly([[0, 0], [58, 0], [76.66, 12], [76.66, 28], [58, 40], [0, 40]]),
-      circle(52, 20, 12.5), // Furo 25x25mm (Não será duplicado lá fora!)
+      circle(52, 20, 12.5),
       poly([[90, 0], [148, 0], [166.66, 12], [166.66, 28], [148, 40], [90, 40]]),
       circle(142, 20, 12.5),
-      // Duas arruelas/calços pequenos de 14x14mm que cabem DENTRO dos furos de 25x25mm!
       rect(0, 55, 14, 14),
       rect(25, 55, 14, 14)
     ];
   } else if (preset === 'trueshape') {
-    // Peças em L, Chanfradas e Molduras com Furo Grande para In-Hole
     entities = [
-      rect(0, 0, 420, 320), rect(80, 70, 260, 180), // Moldura com janela de 260x180
-      poly([[450, 0], [750, 0], [750, 110], [560, 110], [560, 300], [450, 300]]), // Peça em L #1
-      poly([[780, 0], [1080, 0], [1080, 300], [970, 300], [970, 110], [780, 110]]), // Peça em L #2
-      rect(0, 360, 220, 140), // Cabe dentro do furo de 260x180 da Peça #1!
+      rect(0, 0, 420, 320), rect(80, 70, 260, 180),
+      poly([[450, 0], [750, 0], [750, 110], [560, 110], [560, 300], [450, 300]]),
+      poly([[780, 0], [1080, 0], [1080, 300], [970, 300], [970, 110], [780, 110]]),
+      rect(0, 360, 220, 140),
       rect(260, 360, 190, 140),
       rect(480, 360, 160, 120)
     ];
   } else {
-    // Kit Industrial Padrão
     entities = [
       rect(0, 0, 450, 320), rect(125, 90, 200, 140), circle(50, 50, 15), circle(400, 270, 15),
       rect(500, 0, 340, 340), circle(670, 170, 85),
       rect(0, 400, 520, 160), rect(190, 445, 120, 70),
       rect(600, 400, 260, 220),
-      rect(900, 0, 170, 115), // Cabe dentro do furo 200x140 da Peça #1!
+      rect(900, 0, 170, 115),
       rect(900, 180, 210, 110)
     ];
   }
