@@ -1,13 +1,15 @@
 // public/app.js
+'use strict';
+
 let currentContours = [];
 let catalogParts = [];
-let partQuantities = {}; // { PECA_1: 1, PECA_2: 1, ... }
+let partQuantities = {};
 let customSheetDxf = null;
 let bestSolutionGlobal = null;
 let activeEventSource = null;
 let seedCounter = 1;
 
-// Estado de Zoom e Pan do Canvas
+// Estado de Viewport (Zoom & Pan)
 let viewZoom = 1;
 let viewPanX = 0;
 let viewPanY = 0;
@@ -16,6 +18,7 @@ let panStartX = 0;
 let panStartY = 0;
 let lastRenderTransform = { startX: 0, startY: 0, scale: 1 };
 
+// Seletores de DOM
 const dxfInput = document.getElementById('dxfInput');
 const sheetDxfInput = document.getElementById('sheetDxfInput');
 const fileNameLabel = document.getElementById('fileNameLabel');
@@ -24,19 +27,27 @@ const btnClearCustomSheet = document.getElementById('btnClearCustomSheet');
 const presetSelect = document.getElementById('presetSelect');
 const sheetPresetSelect = document.getElementById('sheetPresetSelect');
 
+// Parâmetros Mandatórios CAM
 const sheetWidthInput = document.getElementById('sheetWidth');
 const sheetHeightInput = document.getElementById('sheetHeight');
-const kerfInput = document.getElementById('kerfInput');
+const kerfWidthInput = document.getElementById('kerfWidthInput');
+const partClearanceInput = document.getElementById('partClearanceInput');
+const sheetMarginInput = document.getElementById('sheetMarginInput');
+const leadInLengthInput = document.getElementById('leadInLengthInput');
 const minHoleSizeInput = document.getElementById('minHoleSize');
 const minRemnantSizeInput = document.getElementById('minRemnantSize');
+const chordalToleranceInput = document.getElementById('chordalToleranceInput');
 const iterationsInput = document.getElementById('iterationsInput');
+const grainRestrictionSelect = document.getElementById('grainRestrictionSelect');
 const optimizationGoalSelect = document.getElementById('optimizationGoal');
+
 const allowRotationInput = document.getElementById('allowRotation');
-const allowFreeAnglesInput = document.getElementById('allowFreeAngles');
 const enableInHoleInput = document.getElementById('enableInHole');
 const commonLineInput = document.getElementById('commonLineInput');
 const showRemnantsInput = document.getElementById('showRemnants');
+const showCamToolpathInput = document.getElementById('showCamToolpath');
 const exportIncludeRemnantsInput = document.getElementById('exportIncludeRemnants');
+const exportIncludeLeadInInput = document.getElementById('exportIncludeLeadIn');
 
 const btnRecalculate = document.getElementById('btnRecalculate');
 const btnLoadSample = document.getElementById('btnLoadSample');
@@ -61,14 +72,14 @@ async function refreshHardwareStatus() {
     const res = await fetch('/api/hardware');
     const hw = await res.json();
     document.getElementById('hwInfoBox').innerHTML =
-      `<strong>CPU:</strong> ${hw.cpuModel} (${hw.totalCores} núcleos)<br>` +
-      `<strong>Pool VPS:</strong> Máx ${hw.maxWorkers} Workers simultâneos (Ativos: ${hw.activeWorkers} | Fila: ${hw.queueSize})<br>` +
-      `<strong>GPU:</strong> ${hw.gpu.name}`;
+      `<strong>CPU:</strong> ${hw.cpuModel} (${hw.totalCores} threads)<br>` +
+      `<strong>Worker Pool VPS:</strong> Máx ${hw.maxWorkers} simultâneos (Ativos: ${hw.activeWorkers} | Fila: ${hw.queueSize})<br>` +
+      `<strong>Aceleração:</strong> ${hw.gpu.name}`;
   } catch (_) {}
 }
 
 // =========================================================
-// 1. CONTROLE INTUITIVO DE QUANTIDADES (MULTIPLICADOR DE LOTE)
+// 1. MULTIPLICADOR DE LOTE E QUANTIDADES SINCRONIZADAS
 // =========================================================
 
 function initDefaultQuantities(partsList) {
@@ -88,7 +99,6 @@ function syncQuantityViews() {
   const totalCount = catalogParts.reduce((acc, p) => acc + (partQuantities[p.id] || 0), 0);
   document.getElementById('totalPartsBadge').textContent = `Total: ${totalCount} pçs`;
 
-  // Renderiza a lista rápida na barra lateral
   const sidebarList = document.getElementById('sidebarQtyList');
   sidebarList.innerHTML = '';
 
@@ -110,13 +120,11 @@ function syncQuantityViews() {
     sidebarList.appendChild(row);
   });
 
-  // Atualiza também os inputs nos cards inferiores se já existirem
   catalogParts.forEach(part => {
     const cardInput = document.getElementById(`card_qty_${part.id}`);
     if (cardInput) cardInput.value = partQuantities[part.id] ?? 1;
   });
 
-  // Eventos nos botões da barra lateral
   sidebarList.querySelectorAll('.qty-btn').forEach(btn => {
     btn.onclick = () => {
       const id = btn.dataset.id;
@@ -130,7 +138,6 @@ function syncQuantityViews() {
   });
 }
 
-// Botões rápidos: Tudo 1x, 2x, 5x, 10x
 document.querySelectorAll('.quick-batch-bar .chip-btn[data-mult]').forEach(btn => {
   btn.addEventListener('click', () => {
     const mult = Number(btn.dataset.mult);
@@ -140,7 +147,6 @@ document.querySelectorAll('.quick-batch-bar .chip-btn[data-mult]').forEach(btn =
   });
 });
 
-// Botão "Auto-Lotar Chapa": calcula proporcionalmente quantas peças cabem na chapa atual!
 btnAutoFillSheet.addEventListener('click', () => {
   if (!catalogParts.length) return;
   const sheetArea = customSheetDxf
@@ -157,7 +163,7 @@ btnAutoFillSheet.addEventListener('click', () => {
 });
 
 // =========================================================
-// 2. UPLOAD DE PEÇAS, CHAPAS E PRESETS DE TESTE
+// 2. INGESTÃO .DXF DE PEÇAS E CHAPAS IRREGULARES
 // =========================================================
 
 dxfInput.addEventListener('change', async (e) => {
@@ -185,7 +191,7 @@ sheetDxfInput.addEventListener('change', async (e) => {
   if (data.sheet) {
     customSheetDxf = data.sheet;
     const obsCount = (customSheetDxf.obstacles || []).length;
-    sheetFileNameLabel.textContent = `Chapa DXF: ${file.name} (${obsCount} furo(s) interno(s))`;
+    sheetFileNameLabel.textContent = `Chapa DXF: ${file.name} (${obsCount} furo(s) CW)`;
     sheetWidthInput.value = Math.round(customSheetDxf.width);
     sheetHeightInput.value = Math.round(customSheetDxf.height);
     btnClearCustomSheet.classList.remove('hidden');
@@ -220,7 +226,7 @@ sheetPresetSelect.addEventListener('change', async () => {
   if (data.sheet) {
     customSheetDxf = data.sheet;
     const obsCount = (customSheetDxf.obstacles || []).length;
-    sheetFileNameLabel.textContent = `Chapa Preset: ${val} (${obsCount} furo(s))`;
+    sheetFileNameLabel.textContent = `Chapa Preset: ${val} (${obsCount} furo(s) CW)`;
     sheetWidthInput.value = Math.round(customSheetDxf.width);
     sheetHeightInput.value = Math.round(customSheetDxf.height);
     btnClearCustomSheet.classList.remove('hidden');
@@ -266,12 +272,15 @@ btnRecalculate.addEventListener('click', () => {
   seedCounter++;
   startBackendSseOptimization();
 });
-showRemnantsInput.addEventListener('change', () => {
-  if (bestSolutionGlobal) drawSheetNesting(bestSolutionGlobal);
+
+[showRemnantsInput, showCamToolpathInput].forEach(el => {
+  el.addEventListener('change', () => {
+    if (bestSolutionGlobal) drawSheetNesting(bestSolutionGlobal);
+  });
 });
 
 // =========================================================
-// 3. COMUNICAÇÃO SSE COM WORKER_THREADS NO BACKEND
+// 3. ORQUESTRAÇÃO SSE COM MOTOR BACKEND V5 (PARÂMETROS MANDATÓRIOS)
 // =========================================================
 
 async function startBackendSseOptimization() {
@@ -285,22 +294,26 @@ async function startBackendSseOptimization() {
   progressPanel.classList.remove('hidden');
   progressBarFill.style.width = '0%';
   progressPercentText.textContent = '0%';
-  progressStatusText.textContent = 'Enviando lote para Worker Thread no Backend...';
+  progressStatusText.textContent = 'Inicializando Matriz NFP/IFP e R-Tree no Worker...';
 
+  // Payload estrito com todos os parâmetros mandatórios do motor V5
   const config = {
-    sheetWidth: Number(sheetWidthInput.value),
-    sheetHeight: Number(sheetHeightInput.value),
-    kerf: Number(kerfInput.value),
-    minHoleSize: Number(minHoleSizeInput.value),
-    minRemnantSize: Number(minRemnantSizeInput.value),
-    totalIterations: Number(iterationsInput.value) || 15000,
-    goal: optimizationGoalSelect.value,
-    allowRotation: allowRotationInput.checked,
-    allowFreeAngles: allowFreeAnglesInput.checked,
-    enableInHole: enableInHoleInput.checked,
-    commonLine: commonLineInput.checked,
-    laserBeamWidth: 0.4,
-    seedOffset: seedCounter
+    sheet_width: Number(sheetWidthInput.value),
+    sheet_height: Number(sheetHeightInput.value),
+    kerf_width: Number(kerfWidthInput.value),
+    part_clearance: Number(partClearanceInput.value),
+    sheet_margin: Number(sheetMarginInput.value),
+    lead_in_length: Number(leadInLengthInput.value),
+    chordal_tolerance: Number(chordalToleranceInput.value),
+    min_hole_size: Number(minHoleSizeInput.value),
+    min_remnant_size: Number(minRemnantSizeInput.value),
+    total_iterations: Number(iterationsInput.value) || 15000,
+    allow_rotation: allowRotationInput.checked,
+    grain_restriction: grainRestrictionSelect.value,
+    hole_filling: enableInHoleInput.checked,
+    common_line_cutting: commonLineInput.checked,
+    optimization_goal: optimizationGoalSelect.value,
+    seed_offset: seedCounter
   };
 
   const initRes = await fetch('/api/start-job', {
@@ -313,7 +326,11 @@ async function startBackendSseOptimization() {
       quantities: partQuantities
     })
   });
-  const { jobId, expandedCount } = await initRes.json();
+  const { jobId, catalogParts: updatedCatalog, expandedCount } = await initRes.json();
+  if (updatedCatalog) {
+    catalogParts = updatedCatalog;
+    renderSeparatedParts(catalogParts);
+  }
 
   const es = new EventSource(`/api/stream/${jobId}`);
   activeEventSource = es;
@@ -330,12 +347,12 @@ async function startBackendSseOptimization() {
       const pct = Math.round((msg.iter / msg.totalIterations) * 100);
       progressBarFill.style.width = `${pct}%`;
       progressPercentText.textContent = `${pct}%`;
-      progressStatusText.textContent = `Worker Backend: ${msg.iter.toLocaleString()} de ${msg.totalIterations.toLocaleString()} simulações...`;
-      progressStrategyText.textContent = `Velocidade: ${msg.calcPerSec.toLocaleString()} cálc/seg | Workers: ${msg.activeWorkers}/${msg.maxWorkers}`;
+      progressStatusText.textContent = `BRKGA + SA: ${msg.iter.toLocaleString()} de ${msg.totalIterations.toLocaleString()} avaliações BLF...`;
+      progressStrategyText.textContent = `Taxa: ${msg.calcPerSec.toLocaleString()} layouts/seg | Workers: ${msg.activeWorkers}/${msg.maxWorkers}`;
 
       if (msg.bestResult) {
         bestSolutionGlobal = msg.bestResult;
-        progressBestText.textContent = `Recorde: ${bestSolutionGlobal.compactUtilization}% (${msg.improvements} avanços)`;
+        progressBestText.textContent = `Recorde Elite: ${bestSolutionGlobal.compactUtilization}% (${msg.improvements} avanços)`;
         drawSheetNesting(bestSolutionGlobal, true);
         updateMetrics(expandedCount, bestSolutionGlobal);
       }
@@ -350,8 +367,8 @@ async function startBackendSseOptimization() {
       bestSolutionGlobal = msg.bestResult;
       progressBarFill.style.width = '100%';
       progressPercentText.textContent = '100%';
-      progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Cálculos Concluídos em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
-      progressStrategyText.textContent = `Taxa Média: ${msg.calcPerSec.toLocaleString()} cálculos/seg no Worker Thread`;
+      progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Avaliações Concluídas em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
+      progressStrategyText.textContent = `Velocidade Média: ${msg.calcPerSec.toLocaleString()} layouts/seg (R-Tree + Int64 NFP)`;
       progressBestText.textContent = `Campeão Travado: ${bestSolutionGlobal.compactUtilization}%`;
 
       drawSheetNesting(bestSolutionGlobal, false);
@@ -367,7 +384,7 @@ async function startBackendSseOptimization() {
 }
 
 // =========================================================
-// 4. ZOOM, PAN E RENDERIZAÇÃO NO CANVAS 2D
+// 4. VIEWPORT CAD/CAM: RENDERIZAÇÃO DE PEÇAS, LEAD-IN E TRAJETÓRIA INSIDE-OUT
 // =========================================================
 
 function resetZoom() {
@@ -423,7 +440,8 @@ nestingCanvas.addEventListener('mousemove', (e) => {
     p => sheetX >= p.x && sheetX <= p.x + p.placedWidth && sheetY >= p.y && sheetY <= p.y + p.placedHeight
   );
   if (hitPart) {
-    hoverInspector.textContent = `${hitPart.name} | Giro: ${hitPart.angle || 0}° | Dim: ${hitPart.placedWidth}x${hitPart.placedHeight}mm | Pos: X=${hitPart.x}mm, Y=${hitPart.y}mm`;
+    const seq = hitPart.cutSequenceOrder ? `Ordem Corte: #${hitPart.cutSequenceOrder}` : '';
+    hoverInspector.textContent = `${hitPart.name} [${seq}] | Giro: ${hitPart.angle || 0}° | Dim: ${hitPart.placedWidth}x${hitPart.placedHeight}mm | Pos: (${hitPart.x}, ${hitPart.y})`;
     return;
   }
 
@@ -435,7 +453,7 @@ nestingCanvas.addEventListener('mousemove', (e) => {
     return;
   }
 
-  hoverInspector.textContent = `Cursor na Chapa: X=${Math.round(sheetX)}mm, Y=${Math.round(sheetY)}mm (Zoom: ${Math.round(viewZoom * 100)}%)`;
+  hoverInspector.textContent = `Coordenada Mesa CNC: X=${Math.round(sheetX)}mm, Y=${Math.round(sheetY)}mm (Zoom: ${Math.round(viewZoom * 100)}%)`;
 });
 
 function drawPolygon(context, points, offsetX, offsetY, scale) {
@@ -489,7 +507,7 @@ function drawSheetNesting(nesting, isHighlight = false) {
     ctx.beginPath(); ctx.moveTo(startX, startY + y * scale); ctx.lineTo(startX + drawW, startY + y * scale); ctx.stroke();
   }
 
-  // Furos/Obstáculos internos da Chapa Principal
+  // Furos/Obstáculos internos da Chapa Principal (CW)
   if (nesting.sheetObstacles && nesting.sheetObstacles.length > 0) {
     nesting.sheetObstacles.forEach((obs) => {
       drawPolygon(ctx, obs.points, startX, startY, scale);
@@ -568,7 +586,8 @@ function drawSheetNesting(nesting, isHighlight = false) {
       ctx.fillStyle = '#0f172a';
       ctx.font = 'bold 9.5px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText(`${part.name}${part.angle ? ` (${part.angle}°)` : ''}`, cx, cy - 1);
+      const seqLabel = (showCamToolpathInput.checked && part.cutSequenceOrder) ? `[${part.cutSequenceOrder}º] ` : '';
+      ctx.fillText(`${seqLabel}${part.name}${part.angle ? ` (${part.angle}°)` : ''}`, cx, cy - 1);
       if (ph > 28) {
         ctx.font = '8.5px monospace';
         ctx.fillText(`${Math.round(part.placedWidth)}x${Math.round(part.placedHeight)}`, cx, cy + 9);
@@ -576,6 +595,48 @@ function drawSheetNesting(nesting, isHighlight = false) {
       ctx.textAlign = 'left';
     }
   });
+
+  // Visualização CAM: Pierce Points, Vetores Lead-in e Trajetória G00 Inside-Out
+  if (showCamToolpathInput.checked && nesting.placedParts.length > 0) {
+    const orderedByCut = [...nesting.placedParts]
+      .filter(p => p.camLeadIn)
+      .sort((a, b) => (a.cutSequenceOrder || 0) - (b.cutSequenceOrder || 0));
+
+    // Linha tracejada de avanço rápido G00 entre os pontos de perfuração
+    ctx.strokeStyle = 'rgba(250, 204, 21, 0.75)';
+    ctx.lineWidth = 1.3;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    orderedByCut.forEach((p, idx) => {
+      const px = startX + p.camLeadIn.piercePoint.x * scale;
+      const py = startY + p.camLeadIn.piercePoint.y * scale;
+      if (idx === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Vetor Lead-in (Pierce Point -> Entry Point) e Cratera de Perfuração
+    orderedByCut.forEach(p => {
+      const pierceX = startX + p.camLeadIn.piercePoint.x * scale;
+      const pierceY = startY + p.camLeadIn.piercePoint.y * scale;
+      const entryX = startX + p.camLeadIn.entryPoint.x * scale;
+      const entryY = startY + p.camLeadIn.entryPoint.y * scale;
+
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(pierceX, pierceY);
+      ctx.lineTo(entryX, entryY);
+      ctx.stroke();
+
+      ctx.fillStyle = '#ef4444';
+      ctx.beginPath();
+      ctx.arc(pierceX, pierceY, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
   ctx.restore();
 
   // Contorno externo da chapa
@@ -592,10 +653,16 @@ function drawSheetNesting(nesting, isHighlight = false) {
 function updateMetrics(totalExpandedCount, nesting) {
   document.getElementById('kpiUtilization').textContent = `${nesting.compactUtilization}%`;
   document.getElementById('kpiRawRatio').textContent =
-    `Bruto na chapa líquida: ${nesting.rawUtilization}% | Estratégia: ${nesting.heuristic} (${nesting.gravityMode})`;
+    `Bruto na chapa líquida: ${nesting.rawUtilization}% | Fibra: ${nesting.grain_restriction || 'ORTHOGONAL'}`;
   document.getElementById('metricSheetArea').textContent = `${(nesting.sheetArea / 100).toFixed(1)} cm²`;
   document.getElementById('metricUsedArea').textContent = `${(nesting.usedArea / 100).toFixed(1)} cm²`;
   document.getElementById('metricPlacedCount').textContent = `${nesting.placedParts.length} / ${totalExpandedCount}`;
+
+  const dNom = nesting.commonLine
+    ? `${nesting.kerf_width} mm (CLC Ativo)`
+    : `${nesting.kerf} mm (${nesting.part_clearance} + ${nesting.kerf_width})`;
+  document.getElementById('metricNominalGap').textContent = dNom;
+
   document.getElementById('metricRemnantArea').textContent =
     `${(nesting.remnantArea / 100).toFixed(1)} cm² (${nesting.remnants.length} retalhos)`;
   document.getElementById('metricInHoleParts').textContent = nesting.inHoleCount || 0;
@@ -603,12 +670,12 @@ function updateMetrics(totalExpandedCount, nesting) {
 
   const obsCount = (nesting.sheetObstacles || []).length;
   document.getElementById('sheetSpecText').textContent =
-    `Chapa: ${nesting.sheetWidth}x${nesting.sheetHeight}mm ${nesting.sheetPoly ? `(DXF Customizado c/ ${obsCount} furo(s)/recorte(s) interno(s))` : ''}`;
+    `Chapa: ${nesting.sheetWidth}x${nesting.sheetHeight}mm | Margem Borda: ${nesting.sheet_margin ?? 6}mm ${nesting.sheetPoly ? `| DXF c/ ${obsCount} obstáculo(s)` : ''}`;
 
   const alertBox = document.getElementById('unplacedAlert');
   if (nesting.unplacedParts && nesting.unplacedParts.length > 0) {
     alertBox.classList.remove('hidden');
-    alertBox.textContent = `Atenção: ${nesting.unplacedParts.length} peça(s) do lote não couberam na área líquida disponível da chapa.`;
+    alertBox.textContent = `Atenção: ${nesting.unplacedParts.length} peça(s) do lote excederam o Inner-Fit Polygon (IFP) da chapa atual.`;
   } else {
     alertBox.classList.add('hidden');
   }
@@ -627,7 +694,7 @@ function renderArchiveButtons(archive, active, totalExpandedCount) {
       Math.abs(sol.compactUtilization - active.compactUtilization) < 0.01 &&
       Math.abs(sol.largestRemnantArea - active.largestRemnantArea) < 5;
     b.className = `candidate-chip ${isAct ? 'active' : ''}`;
-    b.textContent = `Opção #${i + 1}: ${sol.compactUtilization}% (Maior Retalho: ${sol.largestRemnantDim})`;
+    b.textContent = `Elite #${i + 1}: ${sol.compactUtilization}% (Maior Retalho: ${sol.largestRemnantDim})`;
     b.onclick = () => {
       bestSolutionGlobal = sol;
       drawSheetNesting(sol, false);
@@ -643,22 +710,23 @@ function renderSeparatedParts(parts) {
   grid.innerHTML = '';
   parts.forEach(part => {
     const q = partQuantities[part.id] ?? 1;
+    const rMaxOuter = part.outer_contour?.max_inscribed_radius ?? 0;
     const card = document.createElement('div');
     card.className = 'part-card';
     const holesHtml = (part.holes || []).map((h, i) => `
       <div class="hole-tag ${h.usableHole ? 'promoted' : 'scrap'}">
-        Furo #${i + 1}: ${h.width}x${h.height}mm —
-        ${h.usableHole ? 'Sub-Chapa In-Hole / Miolo Útil' : 'Descarte'}
+        Furo CW #${i + 1}: ${h.width}x${h.height}mm (R_max=${h.max_inscribed_radius || 0}mm) —
+        ${h.usableHole ? 'Sub-Chapa Part-in-Part' : 'Sucata'}
       </div>
     `).join('');
 
     card.innerHTML = `
       <div>
-        <div class="part-card-header"><span>${part.name}</span><span class="part-badge">DXF Original</span></div>
+        <div class="part-card-header"><span>${part.name}</span><span class="part-badge">CCW (As > 0)</span></div>
         <div class="part-preview"><canvas width="180" height="110" id="prev_${part.id}"></canvas></div>
         <div class="part-meta">
-          <div><strong>Dimensões:</strong> ${part.width} x ${part.height} mm</div>
-          <div><strong>Área Poligonal:</strong> ${(part.area / 100).toFixed(2)} cm²</div>
+          <div><strong>Envelope AABB:</strong> ${part.width} x ${part.height} mm</div>
+          <div><strong>Área Shoelace:</strong> ${(part.area / 100).toFixed(2)} cm² (R_max=${rMaxOuter}mm)</div>
           ${holesHtml ? `<div class="hole-tag-list">${holesHtml}</div>` : ''}
         </div>
       </div>
@@ -696,10 +764,26 @@ function renderSeparatedParts(parts) {
   });
 }
 
-// 5. EXPORTAÇÃO .DXF FINAL
-function buildLwPoly(pts, layer, color) {
-  const v = pts.map(p => `10\n${(+p.x).toFixed(3)}\n20\n${(+p.y).toFixed(3)}`).join('\n');
-  return `0\nLWPOLYLINE\n8\n${layer}\n62\n${color}\n90\n${pts.length}\n70\n1\n${v}`;
+// =========================================================
+// 5. EXPORTAÇÃO .DXF FINAL MULTI-LAYER (COM LEAD-IN CAM OPCIONAL)
+// =========================================================
+
+function buildLwPoly(pts, layer, color, closed = true) {
+  const v = pts.map(p => `10
+${(+p.x).toFixed(3)}
+20
+${(+p.y).toFixed(3)}`).join('');
+  return `0
+LWPOLYLINE
+8
+${layer}
+62
+${color}
+90
+${pts.length}
+70
+${closed ? 1 : 0}
+${v}`;
 }
 
 btnExportDxf.addEventListener('click', () => {
@@ -710,31 +794,60 @@ btnExportDxf.addEventListener('click', () => {
   const ents = [];
 
   const sheetPts = n.sheetPoly || [{ x: 0, y: 0 }, { x: n.sheetWidth, y: 0 }, { x: n.sheetWidth, y: H }, { x: 0, y: H }];
-  ents.push(buildLwPoly(toCad(sheetPts, 0, 0), '0_CHAPA_LIMITE', 7));
+  ents.push(buildLwPoly(toCad(sheetPts, 0, 0), '0_CHAPA_LIMITE', 7, true));
 
   if (n.sheetObstacles && n.sheetObstacles.length > 0) {
     n.sheetObstacles.forEach(obs => {
-      ents.push(buildLwPoly(toCad(obs.points, 0, 0), '0_CHAPA_FUROS_OBSTACULOS', 30));
+      ents.push(buildLwPoly(toCad(obs.points, 0, 0), '0_CHAPA_FUROS_OBSTACULOS', 30, true));
     });
   }
 
-  n.placedParts.forEach(p => {
-    ents.push(buildLwPoly(toCad(p.placedPoints, p.x, p.y), p.nestedInsideHole ? '1_PECA_IN_HOLE' : '1_CORTE_PECAS', p.nestedInsideHole ? 3 : 5));
+  // Ordena a gravação das entidades no DXF seguindo a Regra Inside-Out (Post-Order Traversal)
+  const orderedParts = [...n.placedParts].sort((a, b) => (a.cutSequenceOrder || 0) - (b.cutSequenceOrder || 0));
+
+  orderedParts.forEach(p => {
+    // 1º Furos internos da peça
     (p.placedHoles || []).forEach(h => {
-      ents.push(buildLwPoly(toCad(h.placedPoints, p.x, p.y), '2_CORTE_FUROS', h.usableHole ? 2 : 1));
+      ents.push(buildLwPoly(toCad(h.placedPoints, p.x, p.y), '2_CORTE_FUROS', h.usableHole ? 2 : 1, true));
     });
+    // 2º Contorno externo da peça
+    ents.push(buildLwPoly(toCad(p.placedPoints, p.x, p.y), p.nestedInsideHole ? '1_PECA_IN_HOLE' : '1_CORTE_PECAS', p.nestedInsideHole ? 3 : 5, true));
+
+    // 3º Vetor de Entrada Lead-in (Pierce Point -> Entry Point)
+    if (exportIncludeLeadInInput.checked && p.camLeadIn) {
+      const leadPts = toCad([p.camLeadIn.piercePoint, p.camLeadIn.entryPoint], 0, 0);
+      ents.push(buildLwPoly(leadPts, '4_CAM_LEAD_IN', 1, false));
+    }
   });
 
   if (exportIncludeRemnantsInput.checked && n.remnants) {
     n.remnants.forEach(r => {
-      ents.push(buildLwPoly(toCad([{ x: 0, y: 0 }, { x: r.width, y: 0 }, { x: r.width, y: r.height }, { x: 0, y: r.height }], r.x, r.y), '3_RETALHOS_UTEIS', 6));
+      ents.push(buildLwPoly(toCad([{ x: 0, y: 0 }, { x: r.width, y: 0 }, { x: r.width, y: r.height }, { x: 0, y: r.height }], r.x, r.y), '3_RETALHOS_UTEIS', 6, true));
     });
   }
 
-  const dxf = `0\nSECTION\n2\nENTITIES\n${ents.join('\n')}\n0\nENDSEC\n0\nEOF`;
+  const dxf = `0
+SECTION
+2
+HEADER
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+${ents.join('')}
+0
+ENDSEC
+0
+EOF`;
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([dxf], { type: 'application/dxf' }));
-  a.download = `nesting_final_${n.sheetWidth}x${n.sheetHeight}.dxf`;
+  a.download = `nesting_cam_v5_${n.sheetWidth}x${n.sheetHeight}.dxf`;
   a.click();
 });
 
@@ -742,3 +855,5 @@ window.addEventListener('DOMContentLoaded', () => {
   refreshHardwareStatus();
   loadSelectedPreset();
 });
+
+setTimeout(() => refreshHardwareStatus(), 5000)

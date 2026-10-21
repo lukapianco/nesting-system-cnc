@@ -1,4 +1,6 @@
 // server.js
+'use strict';
+
 const express = require('express');
 const multer = require('multer');
 const DxfParser = require('dxf-parser');
@@ -7,20 +9,27 @@ const os = require('os');
 const { execSync } = require('child_process');
 const { Worker } = require('worker_threads');
 
+const { normalizeNestingParams } = require('./typesAndInterfaces');
+const {
+  extractContoursFromDxf,
+  classifyPartsAndHoles,
+  buildCustomSheetFromContours
+} = require('./cadParser');
+
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json({ limit: '30mb' }));
+app.use(express.json({ limit: '35mb' }));
 
 // =========================================================
-// 1. DETECÇÃO DE HARDWARE (CPU CORES & GPU)
+// 1. INSPETOR DE HARDWARE (CPU CORES & GPU)
 // =========================================================
 function detectHardware() {
   const cpus = os.cpus() || [];
   const totalCores = cpus.length || 2;
   const maxWorkers = Math.max(1, totalCores - 1);
-  let gpu = { detected: false, name: 'Ausente (Modo CPU Float64 Worker Threads Ativo)' };
+  let gpu = { detected: false, name: 'Ausente (Modo CPU Int64/R-Tree Worker Threads Ativo)' };
 
   try {
     const out = execSync('nvidia-smi --query-gpu=name --format=csv,noheader', {
@@ -44,7 +53,7 @@ const jobQueue = [];
 const pendingJobs = new Map();
 
 // =========================================================
-// 2. POOL DE WORKER_THREADS COM FILA PARA ESCALABILIDADE NA VPS
+// 2. POOL DE WORKER_THREADS COM FILA FIFO
 // =========================================================
 function enqueueJob(job, res) {
   job.res = res;
@@ -114,182 +123,6 @@ function checkQueue() {
   }
 }
 
-// =========================================================
-// 3. GEOMETRIA E PARSER DXF (PEÇAS E CHAPAS CUSTOMIZADAS)
-// =========================================================
-function getBoundingBox(pts) {
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-  for (const p of pts) {
-    if (p.x < minX) minX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y > maxY) maxY = p.y;
-  }
-  const width = +(maxX - minX).toFixed(2);
-  const height = +(maxY - minY).toFixed(2);
-  return { minX, minY, maxX, maxY, width, height, area: +(width * height).toFixed(2) };
-}
-
-function calcPolygonArea(pts) {
-  let a = 0;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    a += (pts[j].x + pts[i].x) * (pts[j].y - pts[i].y);
-  }
-  return Math.abs(a / 2);
-}
-
-function isPointInPolygon(pt, vs) {
-  let inside = false;
-  for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-    const xi = vs[i].x, yi = vs[i].y, xj = vs[j].x, yj = vs[j].y;
-    const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
-      (pt.x < (xj - xi) * (pt.y - yi) / ((yj - yi) || 1e-9) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function stitchLinesToPolygons(lines, tol = 0.5) {
-  const segs = lines.map(l => ({
-    p1: { x: l.vertices[0].x, y: l.vertices[0].y },
-    p2: { x: l.vertices[1].x, y: l.vertices[1].y },
-    used: false
-  }));
-  const polys = [];
-  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-
-  for (let i = 0; i < segs.length; i++) {
-    if (segs[i].used) continue;
-    segs[i].used = true;
-    const poly = [segs[i].p1, segs[i].p2];
-    let closed = false, found = true;
-    while (found && !closed) {
-      found = false;
-      const tail = poly[poly.length - 1];
-      for (let j = 0; j < segs.length; j++) {
-        if (segs[j].used) continue;
-        if (dist(tail, segs[j].p1) <= tol) {
-          segs[j].used = true; poly.push(segs[j].p2); found = true; break;
-        } else if (dist(tail, segs[j].p2) <= tol) {
-          segs[j].used = true; poly.push(segs[j].p1); found = true; break;
-        }
-      }
-      if (poly.length >= 3 && dist(poly[0], poly[poly.length - 1]) <= tol) closed = true;
-    }
-    if (poly.length >= 3) polys.push(poly);
-  }
-  return polys;
-}
-
-function extractContoursFromDxf(dxf) {
-  const contours = [];
-  const looseLines = [];
-  (dxf.entities || []).forEach((ent, idx) => {
-    if ((ent.type === 'LWPOLYLINE' || ent.type === 'POLYLINE') && ent.vertices && ent.vertices.length >= 3) {
-      const pts = ent.vertices.map(v => ({ x: v.x, y: v.y }));
-      // Remove último vértice duplicado caso o CAD já tenha repetido o ponto inicial
-      if (pts.length > 3 && Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) < 0.05) {
-        pts.pop();
-      }
-      const bbox = getBoundingBox(pts);
-      contours.push({ id: `C_${idx}`, points: pts, bbox, trueArea: +(calcPolygonArea(pts)).toFixed(2) || bbox.area });
-    } else if (ent.type === 'CIRCLE' && ent.center && ent.radius) {
-      const pts = [];
-      for (let i = 0; i < 36; i++) {
-        const ang = (i / 36) * Math.PI * 2;
-        pts.push({ x: ent.center.x + Math.cos(ang) * ent.radius, y: ent.center.y + Math.sin(ang) * ent.radius });
-      }
-      const bbox = getBoundingBox(pts);
-      contours.push({ id: `C_${idx}`, points: pts, bbox, trueArea: +(Math.PI * ent.radius ** 2).toFixed(2) });
-    } else if (ent.type === 'LINE' && ent.vertices && ent.vertices.length === 2) {
-      looseLines.push(ent);
-    }
-  });
-
-  if (looseLines.length > 0) {
-    stitchLinesToPolygons(looseLines).forEach((pts, idx) => {
-      if (pts.length > 3 && Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) < 0.1) {
-        pts.pop();
-      }
-      const bbox = getBoundingBox(pts);
-      contours.push({ id: `ST_${idx}`, points: pts, bbox, trueArea: +(calcPolygonArea(pts)).toFixed(2) || bbox.area });
-    });
-  }
-  return contours.filter(c => c.bbox.width > 0.5 && c.bbox.height > 0.5);
-}
-
-// Classifica peças base (catálogo) e seus furos internos sem duplicar furos como peças externas
-function classifyPartsAndHoles(rawContours, minHoleSize) {
-  const sorted = [...rawContours].sort((a, b) => b.bbox.area - a.bbox.area);
-  const parentsMap = new Map();
-
-  for (let i = 0; i < sorted.length; i++) {
-    parentsMap.set(sorted[i].id, []);
-    for (let j = 0; j < i; j++) {
-      const p = sorted[j], c = sorted[i];
-      if (
-        c.bbox.minX >= p.bbox.minX - 0.1 && c.bbox.maxX <= p.bbox.maxX + 0.1 &&
-        c.bbox.minY >= p.bbox.minY - 0.1 && c.bbox.maxY <= p.bbox.maxY + 0.1 &&
-        isPointInPolygon(c.points[0], p.points)
-      ) {
-        parentsMap.get(c.id).push(p.id);
-      }
-    }
-  }
-
-  const parts = [];
-  const holeToParent = new Map();
-
-  sorted.forEach(c => {
-    const anc = parentsMap.get(c.id) || [];
-    if (anc.length % 2 === 0) {
-      const normPts = c.points.map(p => ({ x: +(p.x - c.bbox.minX).toFixed(2), y: +(p.y - c.bbox.minY).toFixed(2) }));
-      parts.push({
-        id: `PECA_${parts.length + 1}`,
-        name: `Peça #${parts.length + 1}`,
-        sourceContourId: c.id,
-        width: c.bbox.width,
-        height: c.bbox.height,
-        bboxArea: c.bbox.area,
-        area: c.trueArea,
-        origMinX: c.bbox.minX,
-        origMinY: c.bbox.minY,
-        points: normPts,
-        holes: []
-      });
-    } else {
-      holeToParent.set(c.id, anc[anc.length - 1]);
-    }
-  });
-
-  sorted.forEach(c => {
-    if (!holeToParent.has(c.id)) return;
-    const parentPart = parts.find(p => p.sourceContourId === holeToParent.get(c.id));
-    if (!parentPart) return;
-
-    const meetsMin = c.bbox.width >= minHoleSize && c.bbox.height >= minHoleSize;
-    const relPts = c.points.map(p => ({
-      x: +(p.x - parentPart.origMinX).toFixed(2),
-      y: +(p.y - parentPart.origMinY).toFixed(2)
-    }));
-    const hb = getBoundingBox(relPts);
-
-    parentPart.holes.push({
-      id: `FURO_${parentPart.holes.length + 1}_${parentPart.id}`,
-      width: c.bbox.width,
-      height: c.bbox.height,
-      area: c.trueArea,
-      relX: hb.minX,
-      relY: hb.minY,
-      usableHole: meetsMin,
-      points: relPts
-    });
-  });
-
-  return parts;
-}
-
-// Expande as peças base de acordo com o Multiplicador de Quantidades definido pelo usuário
 function expandPartsByQuantities(catalogParts, quantitiesMap = {}) {
   const expanded = [];
   for (const part of catalogParts) {
@@ -314,71 +147,17 @@ function expandPartsByQuantities(catalogParts, quantitiesMap = {}) {
   return expanded;
 }
 
-// Extrai o contorno externo da Chapa e mapeia TODOS os furos/obstáculos internos da Chapa
-function buildCustomSheetFromContours(contours) {
-  if (!contours || !contours.length) {
-    throw new Error('DXF da chapa sem contorno fechado.');
-  }
-
-  const sorted = [...contours].sort((a, b) => b.bbox.area - a.bbox.area);
-  const outer = sorted[0];
-
-  const normPts = outer.points.map(p => ({
-    x: +(p.x - outer.bbox.minX).toFixed(2),
-    y: +(p.y - outer.bbox.minY).toFixed(2)
-  }));
-
-  const rawObstacles = sorted.slice(1).filter(c => {
-    const bboxInside =
-      c.bbox.minX >= outer.bbox.minX - 0.5 &&
-      c.bbox.maxX <= outer.bbox.maxX + 0.5 &&
-      c.bbox.minY >= outer.bbox.minY - 0.5 &&
-      c.bbox.maxY <= outer.bbox.maxY + 0.5;
-    return bboxInside && isPointInPolygon(c.points[0], outer.points);
-  });
-
-  const normObstacles = rawObstacles.map((obs, idx) => {
-    const pts = obs.points.map(p => ({
-      x: +(p.x - outer.bbox.minX).toFixed(2),
-      y: +(p.y - outer.bbox.minY).toFixed(2)
-    }));
-    const obBbox = getBoundingBox(pts);
-    return {
-      id: `OBS_CHAPA_${idx + 1}`,
-      name: `Furo/Recorte da Chapa #${idx + 1}`,
-      minX: obBbox.minX,
-      minY: obBbox.minY,
-      maxX: obBbox.maxX,
-      maxY: obBbox.maxY,
-      width: obBbox.width,
-      height: obBbox.height,
-      area: obs.trueArea,
-      points: pts
-    };
-  });
-
-  const obstaclesAreaSum = normObstacles.reduce((acc, o) => acc + o.area, 0);
-  const netArea = Math.max(1, +(outer.trueArea - obstaclesAreaSum).toFixed(2));
-
-  return {
-    isCustomDxf: true,
-    width: outer.bbox.width,
-    height: outer.bbox.height,
-    area: netArea,
-    points: normPts,
-    obstacles: normObstacles
-  };
-}
-
 // =========================================================
-// 4. ROTAS HTTP + STREAM SSE
+// 3. ROTAS HTTP + STREAM SSE
 // =========================================================
 app.get('/api/hardware', (req, res) => res.json({ ...HARDWARE, activeWorkers, queueSize: jobQueue.length }));
 
 app.post('/api/upload-dxf', upload.single('dxfFile'), (req, res) => {
   try {
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo DXF enviado.' });
     const parser = new DxfParser();
-    const contours = extractContoursFromDxf(parser.parseSync(req.file.buffer.toString('utf-8')));
+    const parsed = parser.parseSync(req.file.buffer.toString('utf-8'));
+    const contours = extractContoursFromDxf(parsed, 0.03);
     const catalogParts = classifyPartsAndHoles(contours, 15);
     res.json({ contours, catalogParts });
   } catch (e) {
@@ -390,7 +169,8 @@ app.post('/api/upload-sheet-dxf', upload.single('sheetDxfFile'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo DXF de chapa enviado.' });
     const parser = new DxfParser();
-    const contours = extractContoursFromDxf(parser.parseSync(req.file.buffer.toString('utf-8')));
+    const parsed = parser.parseSync(req.file.buffer.toString('utf-8'));
+    const contours = extractContoursFromDxf(parsed, 0.03);
     const sheet = buildCustomSheetFromContours(contours);
     res.json({ sheet });
   } catch (e) {
@@ -399,13 +179,18 @@ app.post('/api/upload-sheet-dxf', upload.single('sheetDxfFile'), (req, res) => {
 });
 
 app.post('/api/start-job', (req, res) => {
-  const { contours = [], sheet = null, config = {}, quantities = {} } = req.body;
-  const catalogParts = classifyPartsAndHoles(contours, Number(config.minHoleSize || 15));
-  const expandedParts = expandPartsByQuantities(catalogParts, quantities);
-  const jobId = `J_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  try {
+    const { contours = [], sheet = null, config = {}, quantities = {} } = req.body;
+    const normalizedConfig = normalizeNestingParams(config);
+    const catalogParts = classifyPartsAndHoles(contours, normalizedConfig.min_hole_size, normalizedConfig);
+    const expandedParts = expandPartsByQuantities(catalogParts, quantities);
+    const jobId = `J_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-  pendingJobs.set(jobId, { parts: expandedParts, sheet, config });
-  res.json({ jobId, catalogParts, expandedCount: expandedParts.length });
+    pendingJobs.set(jobId, { parts: expandedParts, sheet, config: normalizedConfig });
+    res.json({ jobId, catalogParts, expandedCount: expandedParts.length, normalizedConfig });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/stream/:jobId', (req, res) => {
@@ -421,7 +206,7 @@ app.get('/api/stream/:jobId', (req, res) => {
   enqueueJob(job, res);
 });
 
-// GERADOR DE EXEMPLOS (INCLUINDO AS CHAPAS COM RAMPA E DENTE DAS SUAS IMAGENS!)
+// PRESETS DE ENGENHARIA (PEÇAS E CHAPAS IRREGULARES)
 app.get('/api/sample-dxf', (req, res) => {
   const preset = req.query.preset || 'icamento';
   const poly = (pts) => `0\nLWPOLYLINE\n8\n0\n90\n${pts.length}\n70\n1\n` + pts.map(([x, y]) => `10\n${x}\n20\n${y}`).join('\n');
@@ -436,13 +221,11 @@ app.get('/api/sample-dxf', (req, res) => {
       circle(1040, 170, 45)
     ];
   } else if (preset === 'sheet_ramp_hole') {
-    // Chapa fora de padrão 2012x691 com rampa diagonal esquerda e furo circular central (igual à sua image_9d3577.png!)
     entities = [
       poly([[420, 0], [2012, 0], [1980, 691], [0, 560]]),
       circle(1190, 360, 176.5)
     ];
   } else if (preset === 'sheet_tooth_slot') {
-    // Chapa 722x438 com chanfro direito e rasgo vertical estreito na esquerda (igual à sua image_9d47e2.png!)
     entities = [
       poly([[0, 0], [450, 0], [722, 240], [722, 438], [0, 438]]),
       rect(10, 8, 12, 180)
@@ -481,4 +264,7 @@ app.get('/api/sample-dxf', (req, res) => {
   res.send(dxfString);
 });
 
-app.listen(3000, () => console.log(`Servidor V4 Multi-Thread SSE rodando em http://localhost:3000`));
+const PORT = 3000;
+app.listen(PORT, () => {
+  console.log(`Backend CAD/CAM Modular V5 (R-Tree + NFP + BRKGA) ativo em http://localhost:${PORT}`);
+});

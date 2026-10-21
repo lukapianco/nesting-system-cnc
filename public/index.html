@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DXF Nesting Industrial V4 — Multi-Chapa & Multiplicador de Lote</title>
+  <title>DXF Nesting Industrial V5 — True-Shape, NFP/IFP, BRKGA & CAM</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="top-bar">
     <div class="brand">
-      <span class="badge-tag">ENGINE V4 — TRUE-SHAPE + MULTI-LOTE</span>
-      <h1>SISTEMA DE NESTING INDUSTRIAL (.DXF)</h1>
+      <span class="badge-tag">ENGINE V5 — R-TREE + NFP + BRKGA + CAM</span>
+      <h1>MOTOR INDUSTRIAL DE TRUE SHAPE 2D NESTING & RASTREAMENTO DE RETALHOS (.DXF)</h1>
     </div>
     <div class="header-actions">
       <select id="presetSelect" class="select-input preset-select">
@@ -23,8 +23,8 @@
       <select id="sheetPresetSelect" class="select-input preset-select">
         <option value="rect">Chapa Padrão: Retangular (Medidas X/Y)</option>
         <option value="sheet_stepped">Chapa DXF 1: Formato em Degrau ("L") c/ 2 Furos</option>
-        <option value="sheet_ramp_hole">Chapa DXF 2: Rampa 2012x691 c/ Furo Central (Seu Teste 1)</option>
-        <option value="sheet_tooth_slot">Chapa DXF 3: Dente + Furo Reto 722x438 (Seu Teste 2)</option>
+        <option value="sheet_ramp_hole">Chapa DXF 2: Rampa 2012x691 c/ Furo Central</option>
+        <option value="sheet_tooth_slot">Chapa DXF 3: Dente + Furo Reto 722x438</option>
       </select>
     </div>
   </header>
@@ -33,24 +33,24 @@
     <aside class="sidebar">
       <!-- STATUS DE HARDWARE E WORKERS DA VPS -->
       <section class="panel-card hw-card">
-        <h2>Hardware do Servidor (VPS)</h2>
-        <div id="hwInfoBox" class="hw-info">Verificando núcleos e GPU no backend...</div>
+        <h2>Hardware do Servidor (VPS / Worker Pool)</h2>
+        <div id="hwInfoBox" class="hw-info">Consultando topologia de núcleos e GPU...</div>
       </section>
 
       <!-- 1. ARQUIVOS .DXF (PEÇAS E CHAPA) -->
       <section class="panel-card">
-        <h2>1. Arquivos .DXF (Peças e Chapa)</h2>
+        <h2>1. Ingestão CAD (.DXF Peças e Chapa)</h2>
         <label class="file-dropzone" id="dropzone">
           <input type="file" id="dxfInput" accept=".dxf" hidden />
           <span class="drop-title" id="fileNameLabel">1º Enviar .DXF das Peças de Corte</span>
-          <span class="drop-sub">Suporta Polígonos, Chanfros, Círculos e Furos</span>
+          <span class="drop-sub">Discretização Adaptativa: LINE, ARC, CIRCLE, SPLINE, Bulge</span>
         </label>
 
         <div style="margin-top: 10px;">
           <label class="file-dropzone sheet-dropzone">
             <input type="file" id="sheetDxfInput" accept=".dxf" hidden />
             <span class="drop-title" id="sheetFileNameLabel">2º (Opcional) Enviar .DXF da Chapa Principal</span>
-            <span class="drop-sub">Reconhece qualquer contorno externo e furos da chapa</span>
+            <span class="drop-sub">Mapeia contorno externo CCW e furos/defeitos CW</span>
           </label>
           <button id="btnClearCustomSheet" class="btn btn-outline full-width btn-sm hidden" style="margin-top:6px;">
             Voltar para Chapa Retangular por Medidas (X/Y)
@@ -64,7 +64,7 @@
           <h2>2. Quantidade de Peças (Lote)</h2>
           <span class="batch-total-badge" id="totalPartsBadge">Total: 0 pçs</span>
         </div>
-        <p class="batch-helper">Defina quantas cópias de cada peça deseja cortar na chapa:</p>
+        <p class="batch-helper">Defina quantas cópias de cada peça deseja produzir neste lote:</p>
 
         <div class="quick-batch-bar">
           <button type="button" class="chip-btn" data-mult="1">Tudo 1x</button>
@@ -77,63 +77,86 @@
         <div id="sidebarQtyList" class="sidebar-qty-list"></div>
       </section>
 
-      <!-- 3. PARÂMETROS E OTIMIZAÇÕES INDUSTRIAIS -->
+      <!-- 3. PARÂMETROS MANDATÓRIOS DE ENGENHARIA CAM -->
       <section class="panel-card">
-        <h2>3. Parâmetros da Chapa e Motor</h2>
+        <h2>3. Parâmetros Físicos CAM & Motor BRKGA</h2>
         <div class="form-grid">
           <div class="input-group">
             <label for="sheetWidth">Largura Chapa X (mm)</label>
-            <input type="number" id="sheetWidth" value="180" min="50" step="10" />
+            <input type="number" id="sheetWidth" value="180" min="20" step="10" />
           </div>
           <div class="input-group">
             <label for="sheetHeight">Altura Chapa Y (mm)</label>
-            <input type="number" id="sheetHeight" value="120" min="50" step="10" />
+            <input type="number" id="sheetHeight" value="120" min="20" step="10" />
           </div>
           <div class="input-group">
-            <label for="kerfInput">Distância / Kerf (mm)</label>
-            <input type="number" id="kerfInput" value="6" min="0" step="1" />
+            <label for="kerfWidthInput" title="Largura do feixe de corte (K)">Kerf Feixe K (mm)</label>
+            <input type="number" id="kerfWidthInput" value="0.4" min="0" step="0.1" />
+          </div>
+          <div class="input-group">
+            <label for="partClearanceInput" title="Ponte residual entre peças (C_pp)">Clearance Peças (mm)</label>
+            <input type="number" id="partClearanceInput" value="5.6" min="0" step="0.5" />
+          </div>
+          <div class="input-group">
+            <label for="sheetMarginInput" title="Margem de segurança da borda da chapa">Margem Chapa (mm)</label>
+            <input type="number" id="sheetMarginInput" value="6.0" min="0" step="0.5" />
+          </div>
+          <div class="input-group">
+            <label for="leadInLengthInput" title="Comprimento do vetor de entrada de perfuração">Lead-in Corte (mm)</label>
+            <input type="number" id="leadInLengthInput" value="2.5" min="0" step="0.5" />
           </div>
           <div class="input-group">
             <label for="minHoleSize">Furo Mín. Útil (mm)</label>
             <input type="number" id="minHoleSize" value="10" min="1" step="5" />
           </div>
           <div class="input-group">
-            <label for="minRemnantSize">Retalho Mín. Chapa (mm)</label>
+            <label for="minRemnantSize">Retalho Mín. (mm)</label>
             <input type="number" id="minRemnantSize" value="35" min="10" step="10" />
           </div>
           <div class="input-group">
-            <label for="iterationsInput">Nº de Cálculos (Worker)</label>
-            <input type="number" id="iterationsInput" value="15000" min="100" max="200000" step="5000" />
+            <label for="chordalToleranceInput" title="Erro cordal máximo delta_max p/ curvas">Flecha Curvas (mm)</label>
+            <input type="number" id="chordalToleranceInput" value="0.03" min="0.005" max="0.5" step="0.01" />
+          </div>
+          <div class="input-group">
+            <label for="iterationsInput">Avaliações (BRKGA/SA)</label>
+            <input type="number" id="iterationsInput" value="15000" min="100" max="250000" step="5000" />
           </div>
         </div>
 
         <div class="input-group" style="margin-bottom: 10px;">
-          <label for="optimizationGoal">Critério Principal do Juiz:</label>
+          <label for="grainRestrictionSelect">Restrição de Fibra / Laminação (grain_restriction):</label>
+          <select id="grainRestrictionSelect" class="select-input">
+            <option value="ORTHOGONAL">Ortogonal Padrão (0°, 90°, 180°, 270°)</option>
+            <option value="GRAIN_X">Sentido de Fibra Eixo X (Apenas 0° e 180°)</option>
+            <option value="GRAIN_Y">Sentido de Fibra Eixo Y (Apenas 90° e 270°)</option>
+            <option value="FREE_45">Multi-Ângulo 45° (0°, 45°, 90°, 135°...)</option>
+            <option value="FREE_15">Alta Densidade 15° (24 orientações)</option>
+            <option value="FIXED_0">Travado sem Giro (Apenas 0°)</option>
+          </select>
+        </div>
+
+        <div class="input-group" style="margin-bottom: 10px;">
+          <label for="optimizationGoal">Função Objetivo (Fitness Function):</label>
           <select id="optimizationGoal" class="select-input">
             <option value="MAX_UTILIZATION">Maior % Aproveitamento (Soma Total de Retalhos)</option>
-            <option value="MAX_SINGLE_REMNANT">Maior Retalho Único Inteiro (Chapa Contínua)</option>
-            <option value="MIN_BOUNDING_BOX">Menor Caixa Ocupada (Compactação X/Y)</option>
+            <option value="MAX_SINGLE_REMNANT">Maior Retalho Único Inteiro (Linha Guilhotina)</option>
+            <option value="MIN_BOUNDING_BOX">Menor Envelope + Centro de Massa (Compactação)</option>
           </select>
         </div>
 
         <label class="checkbox-row">
           <input type="checkbox" id="allowRotation" checked />
-          <span>Permitir rotação ortogonal completa (0°, 90°, 180°, 270°)</span>
-        </label>
-
-        <label class="checkbox-row">
-          <input type="checkbox" id="allowFreeAngles" />
-          <span>Permitir ângulos diagonais de 45° (Ideal p/ rampas e triângulos)</span>
+          <span>Permitir rotação automática (allow_rotation)</span>
         </label>
 
         <label class="checkbox-row">
           <input type="checkbox" id="enableInHole" checked />
-          <span>Ativar Nesting In-Hole (Encaixar peças menores dentro de furos)</span>
+          <span>Preencher Furos Internos (hole_filling / Part-in-Part MAT)</span>
         </label>
 
         <label class="checkbox-row">
           <input type="checkbox" id="commonLineInput" />
-          <span>Ativar Corte Comum em Paredes Retas (Feixe: 0.4mm)</span>
+          <span>Corte de Linha Comum (CLC — Distância = kerf_width)</span>
         </label>
 
         <label class="checkbox-row">
@@ -141,24 +164,33 @@
           <span>Destacar retalhos retangulares/quadrados na tela</span>
         </label>
 
+        <label class="checkbox-row">
+          <input type="checkbox" id="showCamToolpath" checked />
+          <span>Exibir Sequência Inside-Out, Pierce Points e Trajetória G00</span>
+        </label>
+
         <button id="btnRecalculate" class="btn btn-primary full-width">
-          Executar Cálculos no Backend (SSE)
+          Executar Otimização BRKGA + NFP (SSE)
         </button>
       </section>
 
       <!-- 4. EXPORTAÇÃO DXF -->
       <section class="panel-card export-card">
-        <h2>4. Exportar .DXF p/ Máquina</h2>
+        <h2>4. Exportar .DXF p/ Máquina CNC</h2>
         <label class="checkbox-row">
           <input type="checkbox" id="exportIncludeRemnants" checked />
-          <span>Manter "Retalho da Chapa (Sobra Útil)" no .DXF</span>
+          <span>Manter Camada "3_RETALHOS_UTEIS" no .DXF</span>
         </label>
-        <button id="btnExportDxf" class="btn btn-export full-width">Baixar .DXF Final do Nesting</button>
+        <label class="checkbox-row">
+          <input type="checkbox" id="exportIncludeLeadIn" checked />
+          <span>Incluir Camada "4_CAM_LEAD_IN" (Vetores de Entrada)</span>
+        </label>
+        <button id="btnExportDxf" class="btn btn-export full-width">Baixar .DXF Final Multi-Layer</button>
       </section>
 
       <!-- 5. ÍNDICES -->
       <section class="panel-card metrics-card">
-        <h2>5. Índices de Aproveitamento</h2>
+        <h2>5. Telemetria de Aproveitamento & CAM</h2>
         <div class="kpi-highlight">
           <div>
             <span class="kpi-label">Aproveitamento na Área Consumida</span>
@@ -169,9 +201,10 @@
         <div class="metrics-list">
           <div class="metric-item"><span>Área Líquida da Chapa:</span><strong id="metricSheetArea">0 cm²</strong></div>
           <div class="metric-item"><span>Área Útil de Peças:</span><strong id="metricUsedArea">0 cm²</strong></div>
-          <div class="metric-item"><span>Peças Encaixadas do Lote:</span><strong id="metricPlacedCount">0 / 0</strong></div>
+          <div class="metric-item"><span>Peças Alocadas do Lote:</span><strong id="metricPlacedCount">0 / 0</strong></div>
+          <div class="metric-item"><span>D_nom (Clearance + Kerf):</span><strong id="metricNominalGap">6.00 mm</strong></div>
           <div class="metric-item highlight-remnant"><span>Sobra em Retalhos:</span><strong id="metricRemnantArea">0 cm²</strong></div>
-          <div class="metric-item highlight-hole"><span>Peças Alocadas Dentro de Furos:</span><strong id="metricInHoleParts">0</strong></div>
+          <div class="metric-item highlight-hole"><span>Peças Part-in-Part (In-Hole):</span><strong id="metricInHoleParts">0</strong></div>
           <div class="metric-item highlight-hole"><span>Miolos de Furo Gratuitos:</span><strong id="metricFreeSlugs">0</strong></div>
         </div>
       </section>
@@ -181,14 +214,15 @@
       <div class="panel-card canvas-section">
         <div class="section-header">
           <div>
-            <h2>Simulação Visual da Chapa & Retalhos</h2>
+            <h2>Viewport CAD/CAM: Plano de Corte, NFP & Trajetória Inside-Out</h2>
             <p class="subtitle" id="sheetSpecText">Aguardando simulação...</p>
           </div>
           <div class="legend">
-            <span class="legend-item"><i class="swatch swatch-part"></i> Peça Principal</span>
-            <span class="legend-item"><i class="swatch swatch-promoted"></i> Peça In-Hole</span>
-            <span class="legend-item"><i class="swatch swatch-hole-ok"></i> Furo Útil</span>
-            <span class="legend-item"><i class="swatch swatch-remnant"></i> Retalho da Chapa</span>
+            <span class="legend-item"><i class="swatch swatch-part"></i> Peça CCW</span>
+            <span class="legend-item"><i class="swatch swatch-promoted"></i> Part-in-Part (In-Hole)</span>
+            <span class="legend-item"><i class="swatch swatch-hole-ok"></i> Furo CW Útil</span>
+            <span class="legend-item"><i class="swatch swatch-remnant"></i> Retalho Estoque</span>
+            <span class="legend-item"><i class="swatch swatch-pierce"></i> Pierce + Lead-in</span>
           </div>
         </div>
 
@@ -210,9 +244,9 @@
         <div class="canvas-toolbar">
           <div class="zoom-controls">
             <button type="button" id="btnZoomIn" class="chip-btn">Zoom +</button>
-            <button type="button" id="btnZoomOut" class="chip-btn">Zoom -</button>
+            <button type="button" id="btnZoomOut" class="chip-btn">Zoom −</button>
             <button type="button" id="btnZoomReset" class="chip-btn">100% (Ajustar)</button>
-            <span class="zoom-hint">Use a rodinha do mouse p/ Zoom e arraste p/ mover</span>
+            <span class="zoom-hint">Scroll = Zoom | Arrastar = Pan</span>
           </div>
           <div id="hoverInspector" class="hover-inspector">Passe o mouse sobre uma peça ou retalho</div>
         </div>
@@ -222,7 +256,7 @@
         </div>
 
         <div id="candidatesBar" class="candidates-bar hidden">
-          <span class="candidates-title">Melhores Layouts Encontrados pelo Worker (Clique para inspecionar):</span>
+          <span class="candidates-title">Melhores Indivíduos da Elite BRKGA/SA (Clique para inspecionar):</span>
           <div id="candidatesList" class="candidates-list"></div>
         </div>
         <div id="unplacedAlert" class="alert-box hidden"></div>
@@ -231,8 +265,8 @@
       <div class="panel-card">
         <div class="section-header">
           <div>
-            <h2>Catálogo de Peças & Multiplicador Individual</h2>
-            <p class="subtitle">Altere a quantidade desejada direto no card de cada peça usando os botões [-] e [+].</p>
+            <h2>Catálogo Topológico de Peças (Winding CCW/CW & Raio Inscrito MAT)</h2>
+            <p class="subtitle">Inspecione a área algébrica, o Raio Máximo Inscrito (R_max) dos furos e ajuste o multiplicador de lote individual.</p>
           </div>
         </div>
         <div id="partsGrid" class="parts-grid"></div>
