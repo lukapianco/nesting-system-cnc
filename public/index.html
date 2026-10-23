@@ -106,6 +106,14 @@
             <input type="number" id="leadInLengthInput" value="2.5" min="0" step="0.5" />
           </div>
           <div class="input-group">
+            <label for="holeClearanceInput" title="Folga mínima entre a peça filha (Part-in-Part) e a parede do furo da peça mãe">Folga Furo→Peça (mm)</label>
+            <input type="number" id="holeClearanceInput" value="2.0" min="0" step="0.5" />
+          </div>
+          <div class="input-group">
+            <label for="pierceRadiusInput" title="Raio de dano da cratera de perfuração; o pierce é validado em sucata com esta folga">Cratera Pierce (mm)</label>
+            <input type="number" id="pierceRadiusInput" value="1.0" min="0" step="0.5" />
+          </div>
+          <div class="input-group">
             <label for="minHoleSize">Furo Mín. Útil (mm)</label>
             <input type="number" id="minHoleSize" value="10" min="1" step="5" />
           </div>
@@ -132,6 +140,15 @@
             <option value="FREE_45">Multi-Ângulo 45° (0°, 45°, 90°, 135°...)</option>
             <option value="FREE_15">Alta Densidade 15° (24 orientações)</option>
             <option value="FIXED_0">Travado sem Giro (Apenas 0°)</option>
+          </select>
+        </div>
+
+        <div class="input-group" style="margin-bottom: 10px;">
+          <label for="leadInTypeSelect">Tipo de Lead-in (entrada de corte):</label>
+          <select id="leadInTypeSelect" class="select-input">
+            <option value="ARC">Arco tangente (recomendado)</option>
+            <option value="LINE_45">Reta a 45°</option>
+            <option value="LINE_90">Reta perpendicular</option>
           </select>
         </div>
 
@@ -206,6 +223,9 @@
           <div class="metric-item highlight-remnant"><span>Sobra em Retalhos:</span><strong id="metricRemnantArea">0 cm²</strong></div>
           <div class="metric-item highlight-hole"><span>Peças Part-in-Part (In-Hole):</span><strong id="metricInHoleParts">0</strong></div>
           <div class="metric-item highlight-hole"><span>Miolos de Furo Gratuitos:</span><strong id="metricFreeSlugs">0</strong></div>
+          <div class="metric-item"><span>Perfurações (Pierces):</span><strong id="metricPierces">—</strong></div>
+          <div class="metric-item"><span>Percurso G00 / Corte:</span><strong id="metricRapid">—</strong></div>
+          <div class="metric-item"><span>Validação do Layout:</span><strong id="metricValidation">—</strong></div>
         </div>
       </section>
     </aside>
@@ -260,6 +280,7 @@
           <div id="candidatesList" class="candidates-list"></div>
         </div>
         <div id="unplacedAlert" class="alert-box hidden"></div>
+        <div id="camWarnings" class="alert-box warn-box hidden"></div>
       </div>
 
       <div class="panel-card">

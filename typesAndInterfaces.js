@@ -110,6 +110,12 @@ function normalizeNestingParams(rawConfig = {}) {
     min_remnant_size: Math.max(10, Number(rawConfig.min_remnant_size ?? rawConfig.minRemnantSize ?? 40)),
     common_line_cutting: Boolean(rawConfig.common_line_cutting ?? rawConfig.commonLine ?? false),
     lead_in_length: Math.max(0, Number(rawConfig.lead_in_length ?? 2.5)),
+    lead_in_type: ['ARC', 'LINE_45', 'LINE_90'].includes(rawConfig.lead_in_type) ? rawConfig.lead_in_type : 'ARC',
+    pierce_radius: Math.max(0, Number(rawConfig.pierce_radius ?? rawConfig.pierceRadius ?? 1.0)),
+    hole_clearance: Math.max(0, Number(rawConfig.hole_clearance ?? rawConfig.holeClearance ?? 2.0)),
+    hole_clearance: Math.max(0, Number(rawConfig.hole_clearance ?? rawConfig.holeClearance ?? 2.0)),
+    pierce_radius: Math.max(0, Number(rawConfig.pierce_radius ?? rawConfig.pierceRadius ?? 1.0)),
+    lead_in_type: ['ARC', 'LINE_45', 'LINE_90'].includes(rawConfig.lead_in_type) ? rawConfig.lead_in_type : 'ARC',
     total_iterations: Math.max(50, Math.min(250000, Number(rawConfig.total_iterations ?? rawConfig.totalIterations ?? 15000))),
     optimization_goal: rawConfig.optimization_goal || rawConfig.goal || 'MAX_UTILIZATION',
     seed_offset: Number(rawConfig.seed_offset ?? rawConfig.seedOffset ?? 1)
@@ -142,7 +148,23 @@ function resolveAllowedRotations(allow_rotation, grain_restriction) {
   }
 }
 
+/**
+ * Rotações RELATIVAS (filha dentro de furo) que mantêm o ângulo total da filha dentro do conjunto permitido
+ * para QUALQUER ângulo permitido da peça-mãe. Ex.: GRAIN_Y {90,270} -> relativas {0,180}.
+ * @param {number[]} allowed
+ * @returns {number[]}
+ */
+function resolveRelativeRotations(allowed) {
+  const set = new Set(allowed.map(a => ((a % 360) + 360) % 360));
+  const rels = [];
+  for (let r = 0; r < 360; r += 15) {
+    if (allowed.every(h => set.has((((h + r) % 360) + 360) % 360))) rels.push(r);
+  }
+  return rels.length ? rels : [0];
+}
+
 module.exports = {
   normalizeNestingParams,
-  resolveAllowedRotations
+  resolveAllowedRotations,
+  resolveRelativeRotations
 };

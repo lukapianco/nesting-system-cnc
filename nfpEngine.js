@@ -20,11 +20,30 @@ function orient2dExactInt64(ax, ay, bx, by, cx, cy) {
   return det > 0n ? 1 : (det < 0n ? -1 : 0);
 }
 
+// Limite de erro do determinante 2x2 em double (Shewchuk: (3 + 16ε)ε, ε = 2^-53)
+const ORIENT_ERR_BOUND = 3.3306690738754716e-16;
+
+/**
+ * Orientação robusta com FILTRO DE PONTO FLUTUANTE: o sinal do determinante em double é confiável quando
+ * |det| excede o limite de erro; só no caso duvidoso (quase colinear) cai no cálculo inteiro exato.
+ * Mesma resposta que orient2dExactInt64, sem pagar BigInt em ~100% das chamadas
+ * (era 69% do tempo do worker em chapas DXF customizadas).
+ */
+function orient2dRobust(ax, ay, bx, by, cx, cy) {
+  const detL = (bx - ax) * (cy - ay);
+  const detR = (by - ay) * (cx - ax);
+  const det = detL - detR;
+  const err = ORIENT_ERR_BOUND * (Math.abs(detL) + Math.abs(detR));
+  if (det > err) return 1;
+  if (-det > err) return -1;
+  return orient2dExactInt64(ax, ay, bx, by, cx, cy);
+}
+
 function segmentsIntersectExact(a1, a2, b1, b2) {
-  const o1 = orient2dExactInt64(a1.x, a1.y, a2.x, a2.y, b1.x, b1.y);
-  const o2 = orient2dExactInt64(a1.x, a1.y, a2.x, a2.y, b2.x, b2.y);
-  const o3 = orient2dExactInt64(b1.x, b1.y, b2.x, b2.y, a1.x, a1.y);
-  const o4 = orient2dExactInt64(b1.x, b1.y, b2.x, b2.y, a2.x, a2.y);
+  const o1 = orient2dRobust(a1.x, a1.y, a2.x, a2.y, b1.x, b1.y);
+  const o2 = orient2dRobust(a1.x, a1.y, a2.x, a2.y, b2.x, b2.y);
+  const o3 = orient2dRobust(b1.x, b1.y, b2.x, b2.y, a1.x, a1.y);
+  const o4 = orient2dRobust(b1.x, b1.y, b2.x, b2.y, a2.x, a2.y);
   return (o1 !== o2) && (o3 !== o4);
 }
 
@@ -157,6 +176,7 @@ class NfpCacheManager {
 
 module.exports = {
   orient2dExactInt64,
+  orient2dRobust,
   segmentsIntersectExact,
   pointToSegmentDistSq,
   computeConvexHull,

@@ -1,7 +1,10 @@
 // public/app.js
 'use strict';
 
-let currentContours = [];
+let currentUploadId = null;
+let currentArchive = [];
+let runToken = 0;          // identifica a execução vigente; mensagens de execuções antigas são descartadas
+let startDebounce = null;
 let catalogParts = [];
 let partQuantities = {};
 let customSheetDxf = null;
@@ -16,7 +19,9 @@ let viewPanY = 0;
 let isPanning = false;
 let panStartX = 0;
 let panStartY = 0;
-let lastRenderTransform = { startX: 0, startY: 0, scale: 1 };
+let lastRenderTransform = { startX: 0, startY: 0, scale: 1, H: 0 };
+
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 // Seletores de DOM
 const dxfInput = document.getElementById('dxfInput');
@@ -40,6 +45,9 @@ const chordalToleranceInput = document.getElementById('chordalToleranceInput');
 const iterationsInput = document.getElementById('iterationsInput');
 const grainRestrictionSelect = document.getElementById('grainRestrictionSelect');
 const optimizationGoalSelect = document.getElementById('optimizationGoal');
+const holeClearanceInput = document.getElementById('holeClearanceInput');
+const pierceRadiusInput = document.getElementById('pierceRadiusInput');
+const leadInTypeSelect = document.getElementById('leadInTypeSelect');
 
 const allowRotationInput = document.getElementById('allowRotation');
 const enableInHoleInput = document.getElementById('enableInHole');
@@ -92,7 +100,7 @@ function setPartQuantity(partId, newQty, triggerSim = true) {
   const cleanQty = Math.max(0, Math.min(500, Number(newQty) || 0));
   partQuantities[partId] = cleanQty;
   syncQuantityViews();
-  if (triggerSim) startBackendSseOptimization();
+  if (triggerSim) scheduleOptimization();
 }
 
 function syncQuantityViews() {
@@ -108,7 +116,7 @@ function syncQuantityViews() {
     row.className = 'qty-item-row';
     row.innerHTML = `
       <div class="qty-item-info">
-        <span class="qty-item-name">${part.name}</span>
+        <span class="qty-item-name">${esc(part.name)}</span>
         <span class="qty-item-dim">${Math.round(part.width)}x${Math.round(part.height)}mm</span>
       </div>
       <div class="qty-stepper">
@@ -143,7 +151,7 @@ document.querySelectorAll('.quick-batch-bar .chip-btn[data-mult]').forEach(btn =
     const mult = Number(btn.dataset.mult);
     catalogParts.forEach(p => { partQuantities[p.id] = mult; });
     syncQuantityViews();
-    startBackendSseOptimization();
+    scheduleOptimization();
   });
 });
 
@@ -159,26 +167,42 @@ btnAutoFillSheet.addEventListener('click', () => {
   const targetSets = Math.max(1, Math.min(80, Math.floor((sheetArea * 0.72) / singleSetArea)));
   catalogParts.forEach(p => { partQuantities[p.id] = targetSets; });
   syncQuantityViews();
-  startBackendSseOptimization();
+  scheduleOptimization();
 });
+
+function scheduleOptimization(delay = 400) {
+  clearTimeout(startDebounce);
+  startDebounce = setTimeout(startBackendSseOptimization, delay);
+}
 
 // =========================================================
 // 2. INGESTÃO .DXF DE PEÇAS E CHAPAS IRREGULARES
 // =========================================================
 
+/** Envia o DXF das peças; o servidor guarda o parse (uploadId) e a tolerância de flecha é aplicada a cada job. */
+async function uploadPartsFile(file) {
+  const fd = new FormData();
+  fd.append('dxfFile', file);
+  const res = await fetch(`/api/upload-dxf?tol=${encodeURIComponent(chordalToleranceInput.value || 0.03)}`, { method: 'POST', body: fd });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Falha no upload (HTTP ${res.status})`);
+  currentUploadId = data.uploadId || null;
+  catalogParts = data.catalogParts || [];
+  initDefaultQuantities(catalogParts);
+  renderSeparatedParts(catalogParts);
+  if (data.warnings && data.warnings.length) showCamMessage(data.warnings.join(' | '));
+}
+
 dxfInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   fileNameLabel.textContent = file.name;
-  const fd = new FormData();
-  fd.append('dxfFile', file);
-  const res = await fetch('/api/upload-dxf', { method: 'POST', body: fd });
-  const data = await res.json();
-  currentContours = data.contours || [];
-  catalogParts = data.catalogParts || [];
-  initDefaultQuantities(catalogParts);
-  renderSeparatedParts(catalogParts);
-  startBackendSseOptimization();
+  try {
+    await uploadPartsFile(file);
+    startBackendSseOptimization();
+  } catch (err) {
+    showCamMessage(`Erro ao ler o DXF das peças: ${err.message}`);
+  }
 });
 
 sheetDxfInput.addEventListener('change', async (e) => {
@@ -253,17 +277,13 @@ async function loadSelectedPreset() {
   const blob = await dxfRes.blob();
   const file = new File([blob], `exemplo_${preset}.dxf`);
   fileNameLabel.textContent = `${file.name} (Ativo)`;
-
-  const fd = new FormData();
-  fd.append('dxfFile', file);
-  const res = await fetch('/api/upload-dxf', { method: 'POST', body: fd });
-  const data = await res.json();
-  currentContours = data.contours || [];
-  catalogParts = data.catalogParts || [];
-  initDefaultQuantities(catalogParts);
-  renderSeparatedParts(catalogParts);
-  resetZoom();
-  startBackendSseOptimization();
+  try {
+    await uploadPartsFile(file);
+    resetZoom();
+    startBackendSseOptimization();
+  } catch (err) {
+    showCamMessage(`Erro ao carregar o preset: ${err.message}`);
+  }
 }
 
 btnLoadSample.addEventListener('click', loadSelectedPreset);
@@ -283,20 +303,40 @@ btnRecalculate.addEventListener('click', () => {
 // 3. ORQUESTRAÇÃO SSE COM MOTOR BACKEND V5 (PARÂMETROS MANDATÓRIOS)
 // =========================================================
 
+function resetRunUi() {
+  // Tudo que pertence à execução ANTERIOR é descartado: elites, melhor solução e avisos
+  currentArchive = [];
+  candidatesList.innerHTML = '';
+  candidatesBar.classList.add('hidden');
+  bestSolutionGlobal = null;
+  showCamMessage('');
+  document.getElementById('unplacedAlert').classList.add('hidden');
+  ctx.clearRect(0, 0, nestingCanvas.width, nestingCanvas.height);
+}
+
+function showCamMessage(text) {
+  const box = document.getElementById('camWarnings');
+  if (!box) return;
+  box.textContent = text || '';
+  box.classList.toggle('hidden', !text);
+}
+
 async function startBackendSseOptimization() {
-  if (!currentContours.length) return;
+  if (!currentUploadId) return;
+  const myRun = ++runToken;
   if (activeEventSource) {
     activeEventSource.close();
     activeEventSource = null;
   }
+  resetRunUi();
 
   btnRecalculate.disabled = true;
+  btnExportDxf.disabled = true;
   progressPanel.classList.remove('hidden');
   progressBarFill.style.width = '0%';
   progressPercentText.textContent = '0%';
   progressStatusText.textContent = 'Inicializando Matriz NFP/IFP e R-Tree no Worker...';
 
-  // Payload estrito com todos os parâmetros mandatórios do motor V5
   const config = {
     sheet_width: Number(sheetWidthInput.value),
     sheet_height: Number(sheetHeightInput.value),
@@ -304,6 +344,9 @@ async function startBackendSseOptimization() {
     part_clearance: Number(partClearanceInput.value),
     sheet_margin: Number(sheetMarginInput.value),
     lead_in_length: Number(leadInLengthInput.value),
+    lead_in_type: leadInTypeSelect.value,
+    pierce_radius: Number(pierceRadiusInput.value),
+    hole_clearance: Number(holeClearanceInput.value),
     chordal_tolerance: Number(chordalToleranceInput.value),
     min_hole_size: Number(minHoleSizeInput.value),
     min_remnant_size: Number(minRemnantSizeInput.value),
@@ -316,17 +359,25 @@ async function startBackendSseOptimization() {
     seed_offset: seedCounter
   };
 
-  const initRes = await fetch('/api/start-job', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contours: currentContours,
-      sheet: customSheetDxf,
-      config,
-      quantities: partQuantities
-    })
-  });
-  const { jobId, catalogParts: updatedCatalog, expandedCount } = await initRes.json();
+  let init;
+  try {
+    const initRes = await fetch('/api/start-job', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uploadId: currentUploadId, sheet: customSheetDxf, config, quantities: partQuantities })
+    });
+    init = await initRes.json().catch(() => ({}));
+    if (!initRes.ok) throw new Error(init.error || `HTTP ${initRes.status}`);
+  } catch (err) {
+    if (myRun === runToken) {
+      progressStatusText.textContent = `Erro ao iniciar: ${err.message}`;
+      btnRecalculate.disabled = false;
+    }
+    return;
+  }
+  if (myRun !== runToken) return; // uma execução mais nova assumiu enquanto esperávamos o servidor
+
+  const { jobId, catalogParts: updatedCatalog, expandedCount } = init;
   if (updatedCatalog) {
     catalogParts = updatedCatalog;
     renderSeparatedParts(catalogParts);
@@ -336,10 +387,19 @@ async function startBackendSseOptimization() {
   activeEventSource = es;
 
   es.onmessage = (event) => {
+    if (myRun !== runToken) { es.close(); return; } // descarta mensagens de execuções antigas
     const msg = JSON.parse(event.data);
 
     if (msg.type === 'queued') {
       progressStatusText.textContent = `Fila VPS: Posição #${msg.position} (${msg.activeWorkers}/${msg.maxWorkers} Workers)...`;
+      return;
+    }
+
+    if (msg.type === 'error') {
+      es.close();
+      activeEventSource = null;
+      btnRecalculate.disabled = false;
+      progressStatusText.textContent = `Erro no motor: ${msg.error || 'falha desconhecida'}`;
       return;
     }
 
@@ -365,20 +425,25 @@ async function startBackendSseOptimization() {
       refreshHardwareStatus();
 
       bestSolutionGlobal = msg.bestResult;
+      currentArchive = msg.topArchive || [];
       progressBarFill.style.width = '100%';
       progressPercentText.textContent = '100%';
       progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Avaliações Concluídas em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
-      progressStrategyText.textContent = `Velocidade Média: ${msg.calcPerSec.toLocaleString()} layouts/seg (R-Tree + Int64 NFP)`;
+      progressStrategyText.textContent = `Velocidade Média: ${msg.calcPerSec.toLocaleString()} layouts/seg`;
+      if (!bestSolutionGlobal) { progressBestText.textContent = 'Nenhum layout gerado.'; return; }
       progressBestText.textContent = `Campeão Travado: ${bestSolutionGlobal.compactUtilization}%`;
 
       drawSheetNesting(bestSolutionGlobal, false);
       updateMetrics(expandedCount, bestSolutionGlobal);
-      renderArchiveButtons(msg.topArchive || [], bestSolutionGlobal, expandedCount);
+      renderArchiveButtons(currentArchive, bestSolutionGlobal, expandedCount);
+      btnExportDxf.disabled = false;
     }
   };
 
   es.onerror = () => {
+    if (myRun !== runToken) return;
     es.close();
+    activeEventSource = null;
     btnRecalculate.disabled = false;
   };
 }
@@ -419,6 +484,15 @@ nestingCanvas.addEventListener('mousedown', (e) => {
 
 window.addEventListener('mouseup', () => { isPanning = false; });
 
+function pointInPoly(x, y, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i], b = pts[j];
+    if ((a.y > y) !== (b.y > y) && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
 nestingCanvas.addEventListener('mousemove', (e) => {
   if (isPanning) {
     viewPanX = e.clientX - panStartX;
@@ -432,13 +506,15 @@ nestingCanvas.addEventListener('mousemove', (e) => {
   const mx = (e.clientX - rect.left) * (nestingCanvas.width / rect.width);
   const my = (e.clientY - rect.top) * (nestingCanvas.height / rect.height);
 
-  const { startX, startY, scale } = lastRenderTransform;
+  // Eixo Y do viewport = eixo Y do CAD (para cima)
+  const { startX, startY, scale, H } = lastRenderTransform;
   const sheetX = (mx - startX) / scale;
-  const sheetY = (my - startY) / scale;
+  const sheetY = H - (my - startY) / scale;
 
-  const hitPart = bestSolutionGlobal.placedParts.find(
-    p => sheetX >= p.x && sheetX <= p.x + p.placedWidth && sheetY >= p.y && sheetY <= p.y + p.placedHeight
-  );
+  // Hit-test por POLÍGONO real (filhas In-Hole primeiro, pois estão sobre o furo da mãe)
+  const inPart = (p) => pointInPoly(sheetX - p.x, sheetY - p.y, p.placedPoints);
+  const parts = bestSolutionGlobal.placedParts;
+  const hitPart = parts.filter(p => p.nestedInsideHole).find(inPart) || parts.find(inPart);
   if (hitPart) {
     const seq = hitPart.cutSequenceOrder ? `Ordem Corte: #${hitPart.cutSequenceOrder}` : '';
     hoverInspector.textContent = `${hitPart.name} [${seq}] | Giro: ${hitPart.angle || 0}° | Dim: ${hitPart.placedWidth}x${hitPart.placedHeight}mm | Pos: (${hitPart.x}, ${hitPart.y})`;
@@ -456,18 +532,6 @@ nestingCanvas.addEventListener('mousemove', (e) => {
   hoverInspector.textContent = `Coordenada Mesa CNC: X=${Math.round(sheetX)}mm, Y=${Math.round(sheetY)}mm (Zoom: ${Math.round(viewZoom * 100)}%)`;
 });
 
-function drawPolygon(context, points, offsetX, offsetY, scale) {
-  if (!points || !points.length) return;
-  context.beginPath();
-  points.forEach((pt, idx) => {
-    const px = offsetX + pt.x * scale;
-    const py = offsetY + pt.y * scale;
-    if (idx === 0) context.moveTo(px, py);
-    else context.lineTo(px, py);
-  });
-  context.closePath();
-}
-
 function drawSheetNesting(nesting, isHighlight = false) {
   if (!nesting) return;
   const pad = 36;
@@ -475,19 +539,33 @@ function drawSheetNesting(nesting, isHighlight = false) {
   const availH = nestingCanvas.height - pad * 2;
   const baseScale = Math.min(availW / nesting.sheetWidth, availH / nesting.sheetHeight);
   const scale = baseScale * viewZoom;
+  const H = nesting.sheetHeight;
 
   const drawW = nesting.sheetWidth * scale;
-  const drawH = nesting.sheetHeight * scale;
+  const drawH = H * scale;
   const startX = (nestingCanvas.width - drawW) / 2 + viewPanX;
   const startY = (nestingCanvas.height - drawH) / 2 + viewPanY;
 
-  lastRenderTransform = { startX, startY, scale };
+  lastRenderTransform = { startX, startY, scale, H };
+
+  // Mapeamento mesa CNC -> tela: X para a direita, Y PARA CIMA (idêntico ao DXF; nada fica espelhado)
+  const sx = (x) => startX + x * scale;
+  const sy = (y) => startY + (H - y) * scale;
+  const ring = (pts, ox = 0, oy = 0) => {
+    if (!pts || !pts.length) return;
+    ctx.beginPath();
+    pts.forEach((pt, idx) => {
+      if (idx === 0) ctx.moveTo(sx(ox + pt.x), sy(oy + pt.y));
+      else ctx.lineTo(sx(ox + pt.x), sy(oy + pt.y));
+    });
+    ctx.closePath();
+  };
 
   ctx.clearRect(0, 0, nestingCanvas.width, nestingCanvas.height);
 
   ctx.save();
   if (nesting.sheetPoly && nesting.sheetPoly.length > 0) {
-    drawPolygon(ctx, nesting.sheetPoly, startX, startY, scale);
+    ring(nesting.sheetPoly);
     ctx.fillStyle = '#1e293b';
     ctx.fill();
     ctx.clip();
@@ -501,41 +579,38 @@ function drawSheetNesting(nesting, isHighlight = false) {
   ctx.lineWidth = 1;
   const stepGrid = nesting.sheetWidth <= 300 ? 20 : 100;
   for (let x = 0; x <= nesting.sheetWidth; x += stepGrid) {
-    ctx.beginPath(); ctx.moveTo(startX + x * scale, startY); ctx.lineTo(startX + x * scale, startY + drawH); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx(x), startY); ctx.lineTo(sx(x), startY + drawH); ctx.stroke();
   }
-  for (let y = 0; y <= nesting.sheetHeight; y += stepGrid) {
-    ctx.beginPath(); ctx.moveTo(startX, startY + y * scale); ctx.lineTo(startX + drawW, startY + y * scale); ctx.stroke();
+  for (let y = 0; y <= H; y += stepGrid) {
+    ctx.beginPath(); ctx.moveTo(startX, sy(y)); ctx.lineTo(startX + drawW, sy(y)); ctx.stroke();
   }
 
   // Furos/Obstáculos internos da Chapa Principal (CW)
-  if (nesting.sheetObstacles && nesting.sheetObstacles.length > 0) {
-    nesting.sheetObstacles.forEach((obs) => {
-      drawPolygon(ctx, obs.points, startX, startY, scale);
-      ctx.fillStyle = '#0f172a';
-      ctx.fill();
+  (nesting.sheetObstacles || []).forEach((obs) => {
+    ring(obs.points);
+    ctx.fillStyle = '#0f172a';
+    ctx.fill();
+    ctx.strokeStyle = '#f97316';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
 
-      ctx.strokeStyle = '#f97316';
-      ctx.lineWidth = 2;
-      ctx.setLineDash([5, 4]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      const ocx = startX + (obs.minX + obs.width / 2) * scale;
-      const ocy = startY + (obs.minY + obs.height / 2) * scale;
-      ctx.fillStyle = '#fdba74';
-      ctx.font = 'bold 9.5px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText('Furo/Recorte da Chapa', ocx, ocy - 2);
-      ctx.font = '9px monospace';
-      ctx.fillText(`${Math.round(obs.width)}x${Math.round(obs.height)}mm`, ocx, ocy + 9);
-      ctx.textAlign = 'left';
-    });
-  }
+    const ocx = sx(obs.minX + obs.width / 2);
+    const ocy = sy(obs.minY + obs.height / 2);
+    ctx.fillStyle = '#fdba74';
+    ctx.font = 'bold 9.5px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Furo/Recorte da Chapa', ocx, ocy - 2);
+    ctx.font = '9px monospace';
+    ctx.fillText(`${Math.round(obs.width)}x${Math.round(obs.height)}mm`, ocx, ocy + 9);
+    ctx.textAlign = 'left';
+  });
 
   // Retalhos padronizados da chapa
   if (showRemnantsInput.checked && nesting.remnants) {
     nesting.remnants.forEach(rem => {
-      const rx = startX + rem.x * scale, ry = startY + rem.y * scale;
+      const rx = sx(rem.x), ry = sy(rem.y + rem.height);
       const rw = rem.width * scale, rh = rem.height * scale;
       ctx.fillStyle = 'rgba(168, 85, 247, 0.24)';
       ctx.fillRect(rx, ry, rw, rh);
@@ -557,12 +632,10 @@ function drawSheetNesting(nesting, isHighlight = false) {
     });
   }
 
-  // Peças alocadas
-  nesting.placedParts.forEach(part => {
-    const ox = startX + part.x * scale;
-    const oy = startY + part.y * scale;
-
-    drawPolygon(ctx, part.placedPoints, ox, oy, scale);
+  // Peças alocadas (mães primeiro, filhas In-Hole por cima)
+  const drawOrder = [...nesting.placedParts].sort((a, b) => (a.nestedInsideHole ? 1 : 0) - (b.nestedInsideHole ? 1 : 0));
+  drawOrder.forEach(part => {
+    ring(part.placedPoints, part.x, part.y);
     ctx.fillStyle = part.nestedInsideHole ? 'rgba(52, 211, 153, 0.95)' : 'rgba(56, 189, 248, 0.92)';
     ctx.fill();
     ctx.strokeStyle = '#0f172a';
@@ -570,7 +643,7 @@ function drawSheetNesting(nesting, isHighlight = false) {
     ctx.stroke();
 
     (part.placedHoles || []).forEach(hole => {
-      drawPolygon(ctx, hole.placedPoints, ox, oy, scale);
+      ring(hole.placedPoints, part.x, part.y);
       ctx.fillStyle = hole.usableHole ? '#fde047' : '#f87171';
       ctx.fill();
       ctx.strokeStyle = '#0f172a';
@@ -581,8 +654,8 @@ function drawSheetNesting(nesting, isHighlight = false) {
     const pw = part.placedWidth * scale;
     const ph = part.placedHeight * scale;
     if (pw > 26 && ph > 16) {
-      const cx = ox + pw / 2;
-      const cy = oy + ph / 2;
+      const cx = sx(part.x + part.placedWidth / 2);
+      const cy = sy(part.y + part.placedHeight / 2);
       ctx.fillStyle = '#0f172a';
       ctx.font = 'bold 9.5px sans-serif';
       ctx.textAlign = 'center';
@@ -596,44 +669,47 @@ function drawSheetNesting(nesting, isHighlight = false) {
     }
   });
 
-  // Visualização CAM: Pierce Points, Vetores Lead-in e Trajetória G00 Inside-Out
-  if (showCamToolpathInput.checked && nesting.placedParts.length > 0) {
-    const orderedByCut = [...nesting.placedParts]
-      .filter(p => p.camLeadIn)
-      .sort((a, b) => (a.cutSequenceOrder || 0) - (b.cutSequenceOrder || 0));
-
-    // Linha tracejada de avanço rápido G00 entre os pontos de perfuração
-    ctx.strokeStyle = 'rgba(250, 204, 21, 0.75)';
+  // Visualização CAM: sequência REAL de corte (Inside-Out), G00 e perfuração de cada contorno (furos incluídos)
+  const cam = nesting.cam;
+  if (showCamToolpathInput.checked && cam && cam.ops && cam.ops.length) {
+    // Avanço rápido G00 (laranja = passa por cima de peça já solta)
     ctx.lineWidth = 1.3;
     ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    orderedByCut.forEach((p, idx) => {
-      const px = startX + p.camLeadIn.piercePoint.x * scale;
-      const py = startY + p.camLeadIn.piercePoint.y * scale;
-      if (idx === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
+    (cam.rapids || []).forEach(r => {
+      ctx.strokeStyle = r.crossesCut ? 'rgba(249, 115, 22, 0.95)' : 'rgba(250, 204, 21, 0.75)';
+      ctx.beginPath();
+      ctx.moveTo(sx(r.x1), sy(r.y1));
+      ctx.lineTo(sx(r.x2), sy(r.y2));
+      ctx.stroke();
     });
-    ctx.stroke();
     ctx.setLineDash([]);
 
-    // Vetor Lead-in (Pierce Point -> Entry Point) e Cratera de Perfuração
-    orderedByCut.forEach(p => {
-      const pierceX = startX + p.camLeadIn.piercePoint.x * scale;
-      const pierceY = startY + p.camLeadIn.piercePoint.y * scale;
-      const entryX = startX + p.camLeadIn.entryPoint.x * scale;
-      const entryY = startY + p.camLeadIn.entryPoint.y * scale;
-
-      ctx.strokeStyle = '#ef4444';
-      ctx.lineWidth = 2;
+    const showNumbers = cam.ops.length <= 80;
+    cam.ops.forEach(op => {
+      const color = op.invalid ? '#f59e0b' : '#ef4444';
+      // Lead-in (reta ou arco) do ponto de perfuração até a aresta
+      if (op.leadPath && op.leadPath.length > 1) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        op.leadPath.forEach((q, i) => (i === 0 ? ctx.moveTo(sx(q.x), sy(q.y)) : ctx.lineTo(sx(q.x), sy(q.y))));
+        ctx.stroke();
+      }
+      // Cratera de perfuração
+      ctx.fillStyle = color;
       ctx.beginPath();
-      ctx.moveTo(pierceX, pierceY);
-      ctx.lineTo(entryX, entryY);
-      ctx.stroke();
-
-      ctx.fillStyle = '#ef4444';
-      ctx.beginPath();
-      ctx.arc(pierceX, pierceY, 3.2, 0, Math.PI * 2);
+      ctx.arc(sx(op.pierce.x), sy(op.pierce.y), op.kind === 'HOLE' ? 3.6 : 3.2, 0, Math.PI * 2);
       ctx.fill();
+      if (op.kind === 'HOLE') {
+        ctx.strokeStyle = '#0f172a';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+      if (showNumbers) {
+        ctx.fillStyle = '#f8fafc';
+        ctx.font = 'bold 9px sans-serif';
+        ctx.fillText(String(op.seq), sx(op.pierce.x) + 5, sy(op.pierce.y) - 4);
+      }
     });
   }
 
@@ -643,7 +719,7 @@ function drawSheetNesting(nesting, isHighlight = false) {
   ctx.strokeStyle = isHighlight ? '#34d399' : '#94a3b8';
   ctx.lineWidth = isHighlight ? 3.5 : 2;
   if (nesting.sheetPoly && nesting.sheetPoly.length > 0) {
-    drawPolygon(ctx, nesting.sheetPoly, startX, startY, scale);
+    ring(nesting.sheetPoly);
     ctx.stroke();
   } else {
     ctx.strokeRect(startX, startY, drawW, drawH);
@@ -672,6 +748,31 @@ function updateMetrics(totalExpandedCount, nesting) {
   document.getElementById('sheetSpecText').textContent =
     `Chapa: ${nesting.sheetWidth}x${nesting.sheetHeight}mm | Margem Borda: ${nesting.sheet_margin ?? 6}mm ${nesting.sheetPoly ? `| DXF c/ ${obsCount} obstáculo(s)` : ''}`;
 
+  // Telemetria CAM
+  const m = nesting.cam && nesting.cam.metrics;
+  document.getElementById('metricPierces').textContent = m ? `${m.pierceCount} (${m.invalidLeads} sem espaço)` : '—';
+  document.getElementById('metricRapid').textContent = m ? `${(m.rapidLength / 1000).toFixed(2)} m / ${(m.cutLength / 1000).toFixed(2)} m` : '—';
+
+  // Validação independente do layout (só disponível no resultado final)
+  const vEl = document.getElementById('metricValidation');
+  const v = nesting.validation;
+  if (!v) {
+    vEl.textContent = 'validando ao final…';
+    vEl.style.color = '';
+  } else if (v.ok) {
+    vEl.textContent = `APROVADO (${v.checkedPairs} pares)`;
+    vEl.style.color = '#15803d';
+  } else {
+    vEl.textContent = `REPROVADO (${v.errorCount})`;
+    vEl.style.color = '#b91c1c';
+  }
+
+  const notes = [];
+  if (v && !v.ok) notes.push(...v.errors.slice(0, 4).map(e => e.msg));
+  if (nesting.cam && nesting.cam.warnings) notes.push(...nesting.cam.warnings.slice(0, 3));
+  if (v && v.warnings) notes.push(...v.warnings.filter(w => w.type === 'G00_SOBRE_PECA_CORTADA').map(w => w.msg));
+  showCamMessage(notes.join(' | '));
+
   const alertBox = document.getElementById('unplacedAlert');
   if (nesting.unplacedParts && nesting.unplacedParts.length > 0) {
     alertBox.classList.remove('hidden');
@@ -690,11 +791,9 @@ function renderArchiveButtons(archive, active, totalExpandedCount) {
   candidatesList.innerHTML = '';
   archive.forEach((sol, i) => {
     const b = document.createElement('button');
-    const isAct =
-      Math.abs(sol.compactUtilization - active.compactUtilization) < 0.01 &&
-      Math.abs(sol.largestRemnantArea - active.largestRemnantArea) < 5;
-    b.className = `candidate-chip ${isAct ? 'active' : ''}`;
-    b.textContent = `Elite #${i + 1}: ${sol.compactUtilization}% (Maior Retalho: ${sol.largestRemnantDim})`;
+    b.className = `candidate-chip ${sol === active ? 'active' : ''}`;
+    const ok = sol.validation ? (sol.validation.ok ? '✔ ' : '✖ ') : '';
+    b.textContent = `${ok}Elite #${i + 1}: ${sol.compactUtilization}% (Maior Retalho: ${sol.largestRemnantDim})`;
     b.onclick = () => {
       bestSolutionGlobal = sol;
       drawSheetNesting(sol, false);
@@ -722,7 +821,7 @@ function renderSeparatedParts(parts) {
 
     card.innerHTML = `
       <div>
-        <div class="part-card-header"><span>${part.name}</span><span class="part-badge">CCW (As > 0)</span></div>
+        <div class="part-card-header"><span>${esc(part.name)}</span><span class="part-badge">CCW (As > 0)</span></div>
         <div class="part-preview"><canvas width="180" height="110" id="prev_${part.id}"></canvas></div>
         <div class="part-meta">
           <div><strong>Envelope AABB:</strong> ${part.width} x ${part.height} mm</div>
@@ -754,10 +853,18 @@ function renderSeparatedParts(parts) {
     const mCtx = c.getContext('2d');
     const s = Math.min(150 / part.width, 86 / part.height);
     const ox = (180 - part.width * s) / 2, oy = (110 - part.height * s) / 2;
-    drawPolygon(mCtx, part.points, ox, oy, s);
+    const prevRing = (pts) => {
+      mCtx.beginPath();
+      pts.forEach((pt, i) => {
+        const px = ox + pt.x * s, py = oy + (part.height - pt.y) * s; // Y para cima, como no CAD
+        if (i === 0) mCtx.moveTo(px, py); else mCtx.lineTo(px, py);
+      });
+      mCtx.closePath();
+    };
+    prevRing(part.points);
     mCtx.fillStyle = '#38bdf8'; mCtx.fill(); mCtx.stroke();
     (part.holes || []).forEach(h => {
-      drawPolygon(mCtx, h.points, ox, oy, s);
+      prevRing(h.points);
       mCtx.fillStyle = h.usableHole ? '#fde047' : '#f87171';
       mCtx.fill(); mCtx.stroke();
     });
@@ -765,90 +872,36 @@ function renderSeparatedParts(parts) {
 }
 
 // =========================================================
-// 5. EXPORTAÇÃO .DXF FINAL MULTI-LAYER (COM LEAD-IN CAM OPCIONAL)
+// 5. EXPORTAÇÃO .DXF FINAL MULTI-LAYER (GERADA NO SERVIDOR: R12 UNIVERSAL, SEM ESPELHAMENTO)
 // =========================================================
 
-function buildLwPoly(pts, layer, color, closed = true) {
-  const v = pts.map(p => `10
-${(+p.x).toFixed(3)}
-20
-${(+p.y).toFixed(3)}`).join('');
-  return `0
-LWPOLYLINE
-8
-${layer}
-62
-${color}
-90
-${pts.length}
-70
-${closed ? 1 : 0}
-${v}`;
-}
-
-btnExportDxf.addEventListener('click', () => {
+btnExportDxf.addEventListener('click', async () => {
   if (!bestSolutionGlobal) return;
-  const n = bestSolutionGlobal;
-  const H = n.sheetHeight;
-  const toCad = (pts, ox, oy) => pts.map(p => ({ x: ox + p.x, y: H - (oy + p.y) }));
-  const ents = [];
-
-  const sheetPts = n.sheetPoly || [{ x: 0, y: 0 }, { x: n.sheetWidth, y: 0 }, { x: n.sheetWidth, y: H }, { x: 0, y: H }];
-  ents.push(buildLwPoly(toCad(sheetPts, 0, 0), '0_CHAPA_LIMITE', 7, true));
-
-  if (n.sheetObstacles && n.sheetObstacles.length > 0) {
-    n.sheetObstacles.forEach(obs => {
-      ents.push(buildLwPoly(toCad(obs.points, 0, 0), '0_CHAPA_FUROS_OBSTACULOS', 30, true));
+  btnExportDxf.disabled = true;
+  try {
+    const r = await fetch('/api/export-dxf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        layout: bestSolutionGlobal,
+        options: { includeRemnants: exportIncludeRemnantsInput.checked, includeLeadIn: exportIncludeLeadInInput.checked }
+      })
     });
-  }
-
-  // Ordena a gravação das entidades no DXF seguindo a Regra Inside-Out (Post-Order Traversal)
-  const orderedParts = [...n.placedParts].sort((a, b) => (a.cutSequenceOrder || 0) - (b.cutSequenceOrder || 0));
-
-  orderedParts.forEach(p => {
-    // 1º Furos internos da peça
-    (p.placedHoles || []).forEach(h => {
-      ents.push(buildLwPoly(toCad(h.placedPoints, p.x, p.y), '2_CORTE_FUROS', h.usableHole ? 2 : 1, true));
-    });
-    // 2º Contorno externo da peça
-    ents.push(buildLwPoly(toCad(p.placedPoints, p.x, p.y), p.nestedInsideHole ? '1_PECA_IN_HOLE' : '1_CORTE_PECAS', p.nestedInsideHole ? 3 : 5, true));
-
-    // 3º Vetor de Entrada Lead-in (Pierce Point -> Entry Point)
-    if (exportIncludeLeadInInput.checked && p.camLeadIn) {
-      const leadPts = toCad([p.camLeadIn.piercePoint, p.camLeadIn.entryPoint], 0, 0);
-      ents.push(buildLwPoly(leadPts, '4_CAM_LEAD_IN', 1, false));
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      const detail = err.validation ? ' ' + err.validation.errors.slice(0, 3).map(e => e.msg).join(' | ') : '';
+      showCamMessage(`Exportação bloqueada: ${err.error || `HTTP ${r.status}`}${detail}`);
+      return;
     }
-  });
-
-  if (exportIncludeRemnantsInput.checked && n.remnants) {
-    n.remnants.forEach(r => {
-      ents.push(buildLwPoly(toCad([{ x: 0, y: 0 }, { x: r.width, y: 0 }, { x: r.width, y: r.height }, { x: 0, y: r.height }], r.x, r.y), '3_RETALHOS_UTEIS', 6, true));
-    });
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `nesting_cam_${Math.round(bestSolutionGlobal.sheetWidth)}x${Math.round(bestSolutionGlobal.sheetHeight)}.dxf`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  } finally {
+    btnExportDxf.disabled = false;
   }
-
-  const dxf = `0
-SECTION
-2
-HEADER
-9
-$INSUNITS
-70
-4
-0
-ENDSEC
-0
-SECTION
-2
-ENTITIES
-${ents.join('')}
-0
-ENDSEC
-0
-EOF`;
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([dxf], { type: 'application/dxf' }));
-  a.download = `nesting_cam_v5_${n.sheetWidth}x${n.sheetHeight}.dxf`;
-  a.click();
 });
 
 window.addEventListener('DOMContentLoaded', () => {

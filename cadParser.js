@@ -97,8 +97,8 @@ function discretizeArcAdaptive(cx, cy, radius, startAngleRad, endAngleRad, ccw =
 
   const absSweep = Math.abs(dTheta);
   const safeRatio = Math.min(0.9999, Math.max(1e-6, deltaMax / Math.max(radius, deltaMax * 1.01)));
-  const maxStepRad = Math.max(0.05, 2 * Math.acos(1 - safeRatio));
-  const numSegs = Math.max(6, Math.min(180, Math.ceil(absSweep / maxStepRad)));
+  const maxStepRad = Math.max(1e-3, 2 * Math.acos(1 - safeRatio)); // flecha d = R(1-cos(dθ/2)) <= delta_max
+  const numSegs = Math.max(6, Math.min(2000, Math.ceil(absSweep / maxStepRad)));
 
   const pts = [];
   for (let i = 0; i <= numSegs; i++) {
@@ -171,40 +171,85 @@ function deCasteljauCubicAdaptive(p0, p1, p2, p3, deltaMax = 0.03, depth = 0) {
 }
 
 /**
- * Avaliação de B-Spline / NURBS (Entidade SPLINE do DXF) via Recorrência de Cox-de Boor.
+ * Localiza o intervalo de nós k tal que knots[k] <= u < knots[k+1] (n = último índice de controle).
+ */
+function findKnotSpan(n, degree, u, knots) {
+  if (u >= knots[n + 1]) return n;
+  if (u <= knots[degree]) return degree;
+  let lo = degree, hi = n + 1, mid = (lo + hi) >> 1;
+  while (u < knots[mid] || u >= knots[mid + 1]) {
+    if (u < knots[mid]) hi = mid; else lo = mid;
+    mid = (lo + hi) >> 1;
+  }
+  return mid;
+}
+
+/**
+ * Avaliação de B-Spline / NURBS (entidade SPLINE do DXF) pelo algoritmo de de Boor em coordenadas homogêneas.
+ * (A versão anterior dimensionava a base com n+1 funções e errava até ~25 mm nos últimos vãos.)
  */
 function evaluateNurbsPoint(u, degree, controlPoints, knots, weights) {
   const n = controlPoints.length - 1;
-  const basis = new Float64Array(n + 1);
-
-  for (let i = 0; i <= n; i++) {
-    basis[i] = (u >= knots[i] && u < knots[i + 1]) || (Math.abs(u - knots[knots.length - 1]) < 1e-9 && i === n) ? 1.0 : 0.0;
+  const p = degree;
+  const k = findKnotSpan(n, p, u, knots);
+  const d = [];
+  for (let j = 0; j <= p; j++) {
+    const idx = k - p + j;
+    const w = (weights && weights[idx] !== undefined) ? weights[idx] : 1.0;
+    d.push({ x: controlPoints[idx].x * w, y: controlPoints[idx].y * w, w });
   }
-
-  for (let p = 1; p <= degree; p++) {
-    for (let i = 0; i <= n - p; i++) {
-      const d1 = knots[i + p] - knots[i];
-      const d2 = knots[i + p + 1] - knots[i + 1];
-      const t1 = d1 > 1e-9 ? ((u - knots[i]) / d1) * basis[i] : 0;
-      const t2 = d2 > 1e-9 ? ((knots[i + p + 1] - u) / d2) * basis[i + 1] : 0;
-      basis[i] = t1 + t2;
+  for (let r = 1; r <= p; r++) {
+    for (let j = p; j >= r; j--) {
+      const i = k - p + j;
+      const denom = knots[i + p - r + 1] - knots[i];
+      const a = denom > 1e-12 ? (u - knots[i]) / denom : 0;
+      d[j] = {
+        x: (1 - a) * d[j - 1].x + a * d[j].x,
+        y: (1 - a) * d[j - 1].y + a * d[j].y,
+        w: (1 - a) * d[j - 1].w + a * d[j].w
+      };
     }
   }
+  const wd = d[p].w || 1.0;
+  return { x: +(d[p].x / wd).toFixed(4), y: +(d[p].y / wd).toFixed(4) };
+}
 
-  let wx = 0, wy = 0, wSum = 0;
-  for (let i = 0; i <= n; i++) {
-    const w = (weights && weights[i] !== undefined) ? weights[i] : 1.0;
-    const bw = basis[i] * w;
-    wx += bw * controlPoints[i].x;
-    wy += bw * controlPoints[i].y;
-    wSum += bw;
+/**
+ * Spline definida apenas por fit points (curva PASSA pelos pontos): Catmull-Rom centrípeta,
+ * em vez de tratá-los como pontos de controle (o que deformava a curva).
+ */
+function discretizeFitPointSpline(fit, deltaMax) {
+  if (fit.length < 3) return fit.map(p => ({ x: p.x, y: p.y }));
+  const P = [fit[0], ...fit, fit[fit.length - 1]];
+  const out = [{ x: fit[0].x, y: fit[0].y }];
+  const tj = (ti, a, b) => ti + Math.pow(Math.hypot(b.x - a.x, b.y - a.y), 0.5);
+  for (let i = 1; i < P.length - 2; i++) {
+    const p0 = P[i - 1], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2];
+    const t0 = 0, t1 = tj(t0, p0, p1), t2 = tj(t1, p1, p2), t3 = tj(t2, p2, p3);
+    if (t2 - t1 < 1e-9) continue;
+    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const steps = Math.max(4, Math.min(200, Math.ceil(segLen / Math.max(deltaMax * 40, 0.5))));
+    for (let s = 1; s <= steps; s++) {
+      const t = t1 + ((t2 - t1) * s) / steps;
+      const lerp = (a, b, ta, tb) => ({
+        x: tb - ta < 1e-12 ? a.x : ((tb - t) / (tb - ta)) * a.x + ((t - ta) / (tb - ta)) * b.x,
+        y: tb - ta < 1e-12 ? a.y : ((tb - t) / (tb - ta)) * a.y + ((t - ta) / (tb - ta)) * b.y
+      });
+      const A1 = lerp(p0, p1, t0, t1), A2 = lerp(p1, p2, t1, t2), A3 = lerp(p2, p3, t2, t3);
+      const B1 = lerp(A1, A2, t0, t2), B2 = lerp(A2, A3, t1, t3);
+      const C = lerp(B1, B2, t1, t2);
+      out.push({ x: +C.x.toFixed(4), y: +C.y.toFixed(4) });
+    }
   }
-  const denom = wSum || 1.0;
-  return { x: +(wx / denom).toFixed(4), y: +(wy / denom).toFixed(4) };
+  return out;
 }
 
 function discretizeSplineEntity(ent, deltaMax = 0.03) {
-  const ctrl = ent.controlPoints || ent.fitPoints || [];
+  const hasCtrl = ent.controlPoints && ent.controlPoints.length >= 2;
+  if (!hasCtrl && ent.fitPoints && ent.fitPoints.length >= 2) {
+    return discretizeFitPointSpline(ent.fitPoints, deltaMax);
+  }
+  const ctrl = ent.controlPoints || [];
   if (ctrl.length < 2) return [];
   if (ctrl.length === 4 && (!ent.knotValues || ent.knotValues.length === 0)) {
     return deCasteljauCubicAdaptive(ctrl[0], ctrl[1], ctrl[2], ctrl[3], deltaMax);
@@ -251,12 +296,13 @@ function discretizeSplineEntity(ent, deltaMax = 0.03) {
 // =========================================================================
 
 function chainLooseSegmentsRTree(rawSegments, epsChain = 0.25, epsDegenerate = 0.02) {
+  let openChainCount = 0;
   // 1. Filtra segmentos degenerados (comprimento < epsDegenerate)
   const validSegs = rawSegments.filter(
     s => Math.hypot(s.p2.x - s.p1.x, s.p2.y - s.p1.y) >= epsDegenerate
   ).map((s, idx) => ({ id: idx, p1: s.p1, p2: s.p2, used: false }));
 
-  if (validSegs.length === 0) return [];
+  if (validSegs.length === 0) { const e = []; e.openChainCount = 0; return e; }
 
   // 2. Indexa todas as extremidades na R-Tree para busca de vizinhos em O(log V)
   const endpointTree = new RTree2D(8);
@@ -322,11 +368,14 @@ function chainLooseSegmentsRTree(rawSegments, epsChain = 0.25, epsDegenerate = 0
       }
     }
 
-    if (ring.length >= 3) {
+    if (closed && ring.length >= 3) {
       polygons.push(simplifyCollinearVertices(ring));
+    } else if (ring.length >= 2) {
+      openChainCount++;
     }
   }
 
+  polygons.openChainCount = openChainCount;
   return polygons;
 }
 
@@ -698,6 +747,12 @@ function classifyPartsAndHoles(rawContours, minHoleSize, nestingParams = {}) {
     }
   });
 
+  // Área líquida de material: contorno externo menos furos (a área bruta continua em `area` para heurísticas de caixa)
+  parts.forEach(pt => {
+    const holesArea = pt.holes.reduce((acc, h) => acc + h.area, 0);
+    pt.netArea = +Math.max(0, pt.area - holesArea).toFixed(2);
+  });
+
   return parts;
 }
 
@@ -766,6 +821,10 @@ function buildCustomSheetFromContours(contours) {
 }
 
 module.exports = {
+  discretizeArcAdaptive,
+  evaluateNurbsPoint,
+  discretizeSplineEntity,
+  chainLooseSegmentsRTree,
   getBoundingBox,
   computeSignedArea,
   enforceWindingOrder,
