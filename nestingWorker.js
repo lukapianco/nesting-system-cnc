@@ -1160,7 +1160,9 @@ function decodeCandidateBLF(orderedParts, heuristic, forcedAngles, gravityDir) {
     metricsFull: false
   };
   const hostsOnly = placedParts; // retalhos consideram só as mães
-  applyRemnantMetrics(res, extractStandardRemnants(hostsOnly, sheet, params.min_remnant_size, { fast: true }));
+  const precise = params.evaluation_mode === 'PRECISE';
+  applyRemnantMetrics(res, extractStandardRemnants(hostsOnly, sheet, params.min_remnant_size, { fast: !precise }));
+  res.metricsFull = precise;
   return res;
 }
 
@@ -1243,6 +1245,14 @@ function slimResult(res) {
 // 8. META-HEURÍSTICA HÍBRIDA: BRKGA (POPULAÇÃO ELITE + CROSSOVER) + SA (METROPOLIS)
 // =========================================================================
 
+function thinAngleGenes(genes, rng) {
+  const s = params.angle_gene_strictness;
+  if (s >= 1) return genes;
+  const out = {};
+  for (const k of Object.keys(genes)) if (rng() < s) out[k] = genes[k];
+  return out;
+}
+
 function runHybridMetaheuristicLoop() {
   const totalIterations = params.total_iterations;
   const startTime = Date.now();
@@ -1297,8 +1307,11 @@ function runHybridMetaheuristicLoop() {
   const elite = [];
   const N = parts.length;
   let lastProgressSent = Date.now();
+  const timeLimitMs = params.time_limit_s > 0 ? params.time_limit_s * 1000 : 0;
+  let executed = 0;
 
   for (let iter = 1; iter <= totalIterations; iter++) {
+    executed = iter;
     const heuristic = heuristics[(iter - 1) % heuristics.length];
     const gravityDir = gravityDirs[(iter - 1) % gravityDirs.length];
     let candidateOrder;
@@ -1313,6 +1326,7 @@ function runHybridMetaheuristicLoop() {
       for (const p of candidateOrder) {
         forcedAngles[p.id] = allowedAngles[Math.floor(rng() * allowedAngles.length)];
       }
+      forcedAngles = thinAngleGenes(forcedAngles, rng);
     } else {
       // Pai elite (70%) cruzado com a solução corrente, ou vizinhança SA da corrente
       const cur = { order: currentSAOrder, angles: currentSAAngles };
@@ -1324,7 +1338,7 @@ function runHybridMetaheuristicLoop() {
         base = { order: [...cur.order], angles: { ...cur.angles } };
       }
       candidateOrder = base.order;
-      forcedAngles = base.angles;
+      forcedAngles = thinAngleGenes(base.angles, rng);
 
       const swaps = 1 + (iter % 2);
       for (let s = 0; s < swaps && N > 1; s++) {
@@ -1383,19 +1397,22 @@ function runHybridMetaheuristicLoop() {
     }
 
     const now = Date.now();
-    if (isNewRecord || now - lastProgressSent >= 85 || iter === totalIterations) {
+    const outOfTime = timeLimitMs > 0 && now - startTime >= timeLimitMs;
+    if (isNewRecord || now - lastProgressSent >= 85 || iter === totalIterations || outOfTime) {
       lastProgressSent = now;
       const elapsedSec = Math.max(0.001, (now - startTime) / 1000);
       parentPort.postMessage({
         type: 'progress',
         iter,
         totalIterations,
+        fraction: Math.min(1, Math.max(iter / totalIterations, timeLimitMs ? (now - startTime) / timeLimitMs : 0)),
         calcPerSec: Math.round(iter / elapsedSec),
         improvements,
         isNewRecord,
         bestResult: isNewRecord ? slimResult(bestResult) : undefined
       });
     }
+    if (outOfTime) break;
   }
 
   // Finalização: retalhos finos + plano CAM + validação independente de cada solução enviada
@@ -1419,9 +1436,11 @@ function runHybridMetaheuristicLoop() {
   const totalTimeMs = Date.now() - startTime;
   parentPort.postMessage({
     type: 'done',
-    totalIterations,
+    totalIterations: executed,
+    plannedIterations: totalIterations,
+    stoppedByTimeLimit: executed < totalIterations,
     totalTimeMs,
-    calcPerSec: Math.round(totalIterations / Math.max(0.001, totalTimeMs / 1000)),
+    calcPerSec: Math.round(executed / Math.max(0.001, totalTimeMs / 1000)),
     improvements,
     bestResult: bestResult ? slimResult(bestResult) : null,
     topArchive: finals.map(slimResult)

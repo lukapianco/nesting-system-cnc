@@ -48,6 +48,19 @@ const optimizationGoalSelect = document.getElementById('optimizationGoal');
 const holeClearanceInput = document.getElementById('holeClearanceInput');
 const pierceRadiusInput = document.getElementById('pierceRadiusInput');
 const leadInTypeSelect = document.getElementById('leadInTypeSelect');
+const qualityModeSelect = document.getElementById('qualityModeSelect');
+const timeLimitInput = document.getElementById('timeLimitInput');
+const processSelect = document.getElementById('processSelect');
+const thicknessInput = document.getElementById('thicknessInput');
+const btnApplyProfile = document.getElementById('btnApplyProfile');
+const profileNotes = document.getElementById('profileNotes');
+
+// Regra do produto: qualidade > velocidade. O modo define o ORÇAMENTO de busca, nunca a correção do resultado.
+const QUALITY_MODES = {
+  RASCUNHO: { iterations: 3000, evaluation_mode: 'FAST' },
+  PADRAO: { iterations: 15000, evaluation_mode: 'PRECISE' },
+  PRODUCAO: { iterations: 60000, evaluation_mode: 'PRECISE' }
+};
 
 const allowRotationInput = document.getElementById('allowRotation');
 const enableInHoleInput = document.getElementById('enableInHole');
@@ -350,7 +363,9 @@ async function startBackendSseOptimization() {
     chordal_tolerance: Number(chordalToleranceInput.value),
     min_hole_size: Number(minHoleSizeInput.value),
     min_remnant_size: Number(minRemnantSizeInput.value),
-    total_iterations: Number(iterationsInput.value) || 15000,
+    total_iterations: (QUALITY_MODES[qualityModeSelect.value] || {}).iterations || Number(iterationsInput.value) || 15000,
+    evaluation_mode: (QUALITY_MODES[qualityModeSelect.value] || {}).evaluation_mode || 'PRECISE',
+    time_limit_s: Number(timeLimitInput.value) || 0,
     allow_rotation: allowRotationInput.checked,
     grain_restriction: grainRestrictionSelect.value,
     hole_filling: enableInHoleInput.checked,
@@ -404,7 +419,7 @@ async function startBackendSseOptimization() {
     }
 
     if (msg.type === 'progress') {
-      const pct = Math.round((msg.iter / msg.totalIterations) * 100);
+      const pct = Math.round((msg.fraction ?? (msg.iter / msg.totalIterations)) * 100);
       progressBarFill.style.width = `${pct}%`;
       progressPercentText.textContent = `${pct}%`;
       progressStatusText.textContent = `BRKGA + SA: ${msg.iter.toLocaleString()} de ${msg.totalIterations.toLocaleString()} avaliações BLF...`;
@@ -428,7 +443,7 @@ async function startBackendSseOptimization() {
       currentArchive = msg.topArchive || [];
       progressBarFill.style.width = '100%';
       progressPercentText.textContent = '100%';
-      progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Avaliações Concluídas em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
+      progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Avaliações ${msg.stoppedByTimeLimit ? '(limite de tempo atingido)' : 'Concluídas'} em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
       progressStrategyText.textContent = `Velocidade Média: ${msg.calcPerSec.toLocaleString()} layouts/seg`;
       if (!bestSolutionGlobal) { progressBestText.textContent = 'Nenhum layout gerado.'; return; }
       progressBestText.textContent = `Campeão Travado: ${bestSolutionGlobal.compactUtilization}%`;
@@ -730,6 +745,8 @@ function updateMetrics(totalExpandedCount, nesting) {
   document.getElementById('kpiUtilization').textContent = `${nesting.compactUtilization}%`;
   document.getElementById('kpiRawRatio').textContent =
     `Bruto na chapa líquida: ${nesting.rawUtilization}% | Fibra: ${nesting.grain_restriction || 'ORTHOGONAL'}`;
+  document.getElementById('metricNetUtil').textContent = `${nesting.rawUtilization}%`;
+  document.getElementById('metricLargestRemnant').textContent = nesting.largestRemnantArea ? `${nesting.largestRemnantDim} (${(nesting.largestRemnantArea / 100).toFixed(1)} cm²)` : '—';
   document.getElementById('metricSheetArea').textContent = `${(nesting.sheetArea / 100).toFixed(1)} cm²`;
   document.getElementById('metricUsedArea').textContent = `${(nesting.usedArea / 100).toFixed(1)} cm²`;
   document.getElementById('metricPlacedCount').textContent = `${nesting.placedParts.length} / ${totalExpandedCount}`;
@@ -750,7 +767,7 @@ function updateMetrics(totalExpandedCount, nesting) {
 
   // Telemetria CAM
   const m = nesting.cam && nesting.cam.metrics;
-  document.getElementById('metricPierces').textContent = m ? `${m.pierceCount} (${m.invalidLeads} sem espaço)` : '—';
+  document.getElementById('metricPierces').textContent = m ? `${m.pierceCount} (${m.narrowWebPierces || 0} em alma estreita, ${m.invalidLeads} sem espaço)` : '—';
   document.getElementById('metricRapid').textContent = m ? `${(m.rapidLength / 1000).toFixed(2)} m / ${(m.cutLength / 1000).toFixed(2)} m` : '—';
 
   // Validação independente do layout (só disponível no resultado final)
@@ -904,7 +921,41 @@ btnExportDxf.addEventListener('click', async () => {
   }
 });
 
+async function initProcessProfiles() {
+  try {
+    const r = await fetch('/api/process-profiles');
+    const data = await r.json();
+    (data.processes || []).forEach((p) => {
+      const o = document.createElement('option');
+      o.value = p.key; o.textContent = p.label; o.title = p.description;
+      processSelect.appendChild(o);
+    });
+  } catch (_) { /* perfis são opcionais */ }
+}
+
+btnApplyProfile.addEventListener('click', async () => {
+  if (!processSelect.value) { profileNotes.textContent = 'Escolha um processo de corte.'; return; }
+  try {
+    const r = await fetch(`/api/recommend-params?process=${encodeURIComponent(processSelect.value)}&thickness=${encodeURIComponent(thicknessInput.value)}`);
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    const p = data.params;
+    kerfWidthInput.value = p.kerf_width;
+    partClearanceInput.value = p.part_clearance;
+    sheetMarginInput.value = p.sheet_margin;
+    leadInLengthInput.value = p.lead_in_length;
+    pierceRadiusInput.value = p.pierce_radius;
+    holeClearanceInput.value = p.hole_clearance;
+    minHoleSizeInput.value = p.min_hole_size;
+    leadInTypeSelect.value = p.lead_in_type;
+    profileNotes.textContent = data.notes.join(' ');
+  } catch (err) {
+    profileNotes.textContent = `Erro: ${err.message}`;
+  }
+});
+
 window.addEventListener('DOMContentLoaded', () => {
+  initProcessProfiles();
   refreshHardwareStatus();
   loadSelectedPreset();
 });

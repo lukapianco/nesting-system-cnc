@@ -117,7 +117,9 @@ function buildContext(res, params) {
     return out;
   };
 
-  return { items, near, res, params };
+  const openClear = params.pierce_radius + params.kerf_width / 2 + 1.5 * params.lead_in_length + 2.0;
+  const edgeOpen = Math.min(6, Math.max(3, params.sheet_margin * 0.8));
+  return { items, near, res, params, openClear, edgeOpen };
 }
 
 /** Ponto de sucata = fora de todo material de peça (contorno externo menos furos). */
@@ -163,6 +165,16 @@ function insideSheet(ctx, x, y, edgeClear) {
     return true;
   }
   return x >= edgeClear && y >= edgeClear && x <= r.sheetWidth - edgeClear && y <= r.sheetHeight - edgeClear;
+}
+
+function sheetEdgeDist(ctx, x, y) {
+  const r = ctx.res;
+  if (r.sheetPoly) {
+    let m = ringDist(x, y, r.sheetPoly);
+    for (const o of r.sheetObstacles || []) m = Math.min(m, ringDist(x, y, o.points));
+    return m;
+  }
+  return Math.min(x, y, r.sheetWidth - x, r.sheetHeight - y);
 }
 
 function inRemnant(res, x, y) {
@@ -264,9 +276,12 @@ function candidatesForRing(ctx, ring, ownKey) {
         const v = relaxed ? { ok: true, clear: minDistOthers(ctx, path[0].x, path[0].y, 12, ownKey) } : validateLead(ctx, path, E, ownKey, ring);
         if (!v.ok) continue;
         const remnantHit = inRemnant(res, path[0].x, path[0].y);
+        const edgeD = sheetEdgeDist(ctx, path[0].x, path[0].y);
+        // TIER 0 = sucata ABERTA (longe de outras peças e da borda, fora de retalho útil); TIER 1 = alma estreita / borda / retalho
+        const open = !relaxed && v.clear >= ctx.openClear && edgeD >= ctx.edgeOpen && !remnantHit;
         const quality = Math.min(v.clear, 12) + Math.min(e.len, 20) * 0.15
           + (type === params.lead_in_type ? 1 : 0) + (L === lengths[0] ? 1 : 0) - (remnantHit ? 10 : 0);
-        return { entry: E, t, n, leadPath: path, leadType: type, leadLen: L, pierce: path[0], clear: v.clear, quality, invalid: !!relaxed };
+        return { entry: E, t, n, leadPath: path, leadType: type, leadLen: L, pierce: path[0], clear: v.clear, quality, tier: open ? 0 : 1, invalid: !!relaxed };
       }
     }
     return null;
@@ -282,23 +297,35 @@ function candidatesForRing(ctx, ring, ownKey) {
     for (const e of edges) { const c = build(e, 0.5, true); if (c && (!best || c.clear > best.clear)) best = c; }
     if (best) cands.push(best);
   }
-  cands.sort((x, y) => y.quality - x.quality);
+  cands.sort((x, y) => (x.tier - y.tier) || (y.quality - x.quality));
   return cands.slice(0, MAX_CANDS_PER_OP);
 }
 
 // ---------------------------------------------------------------- sequenciamento
+/**
+ * Sequência de corte:
+ *   - regra física Inside-Out dentro de cada peça mãe (filhas -> furo -> ... -> contorno externo);
+ *   - peça a peça (a peça é concluída antes de passar para a próxima);
+ *   - ORDEM DAS PEÇAS otimizada (vizinho mais próximo + Or-opt iterativo sobre o percurso G00 real),
+ *     com penalidade para G00 que passa por cima de peça já solta.
+ */
 function planCam(res, params) {
   const ctx = buildContext(res, params);
   const home = { x: 0, y: 0 };
   const warnings = [];
 
+  const finishOp = (op) => {
+    const bestTier = op.cands.length ? Math.min(...op.cands.map((c) => c.tier)) : 1;
+    op.cands = op.cands.filter((c) => c.tier === bestTier);
+    return op;
+  };
   const makeOp = (it, kind, hole) => {
     const ring = kind === 'HOLE' ? hole.ring : it.outer;
     const ownKey = kind === 'HOLE' ? `${it.id}|H|${hole.id}` : `${it.id}|O`;
-    return {
+    return finishOp({
       kind, item: it, holeId: hole ? hole.id : undefined, ring, ownKey,
       perimeter: ringPerimeter(ring), cands: candidatesForRing(ctx, ring, ownKey)
-    };
+    });
   };
 
   const info = new Map();
@@ -312,97 +339,146 @@ function planCam(res, params) {
     if (!childrenByHole.has(key)) childrenByHole.set(key, []);
     childrenByHole.get(key).push(it);
   }
-
-  const seq = [];
-  const usedPierces = [];
-  // duas crateras (raio R) precisam de >= 2R + folga entre si, senão a segunda cai na poça da primeira
-  const minPierceSpacing = 2 * params.pierce_radius + 1.0;
-  const spacingPenalty = (c) => (usedPierces.some((u) => Math.hypot(u.x - c.pierce.x, u.y - c.pierce.y) < minPierceSpacing) ? 120 : 0);
-  const rapids = [];
-  const finished = []; // contornos externos já cortados (peças soltas sobre a mesa)
-  let pos = home;
-  let rapidLen = 0, cutLen = 0, crossings = 0, invalid = 0;
-  const skipCrossCheck = ctx.items.length > 250;
-
-  const CROSS_PENALTY = 60; // mm equivalentes: evita G00 por cima de peça já solta (risco de tombamento)
-  const crossesFinished = (a, b) => {
-    if (skipCrossCheck || finished.length === 0) return false;
-    const sMinX = Math.min(a.x, b.x), sMaxX = Math.max(a.x, b.x);
-    const sMinY = Math.min(a.y, b.y), sMaxY = Math.max(a.y, b.y);
-    return finished.some((f) =>
-      f.box.minX <= sMaxX && f.box.maxX >= sMinX && f.box.minY <= sMaxY && f.box.maxY >= sMinY &&
-      segmentCrossesRing(a, b, f.ring));
-  };
-  const legCost = (a, b) => Math.hypot(b.x - a.x, b.y - a.y) + (crossesFinished(a, b) ? CROSS_PENALTY : 0);
-
-  const opDist = (p, op) => {
-    let m = Infinity;
-    for (const c of op.cands) m = Math.min(m, legCost(p, c.pierce));
-    return m;
-  };
-
-  const emit = (op) => {
-    if (op.cands.length === 0) { warnings.push(`Sem ponto de perfuração para ${op.item.part.name}`); return; }
-    let best = null, bestScore = Infinity;
-    for (const c of op.cands) {
-      const s = legCost(pos, c.pierce) - c.quality * 0.2 + spacingPenalty(c);
-      if (s < bestScore) { bestScore = s; best = c; }
-    }
-    const crosses = crossesFinished(pos, best.pierce);
-    const len = Math.hypot(best.pierce.x - pos.x, best.pierce.y - pos.y);
-    rapids.push({ x1: pos.x, y1: pos.y, x2: best.pierce.x, y2: best.pierce.y, crossesCut: crosses });
-    rapidLen += len;
-    if (crosses) crossings++;
-    if (best.invalid) { invalid++; warnings.push(`Lead-in sem espaço livre validado em ${op.item.part.name}${op.kind === 'HOLE' ? ' (furo)' : ''}`); }
-    cutLen += op.perimeter;
-    seq.push({
-      seq: seq.length + 1, kind: op.kind, partId: op.item.id, partName: op.item.part.name, holeId: op.holeId,
-      entry: best.entry, pierce: best.pierce, leadPath: best.leadPath, leadType: best.leadType,
-      leadLen: best.leadLen, perimeter: +op.perimeter.toFixed(2), invalid: best.invalid || undefined
-    });
-    usedPierces.push(best.pierce);
-    if (op.kind === 'OUTER') finished.push({ ring: op.ring, box: op.item.outerBox });
-    pos = best.entry;
-  };
-
   const hosts = ctx.items.filter((it) => !it.nested);
-  const remaining = new Set(hosts);
+  const skipCrossCheck = ctx.items.length > 250;
+  const CROSS_PENALTY = 60;
+  const minPierceSpacing = 2 * params.pierce_radius + 1.0;
 
   const unitsOf = (host) => host.holes.map((h) => ({
     holeOp: info.get(host.id).holes.get(h.id),
     kids: childrenByHole.get(h.id) || []
   }));
   const unitStartOp = (u) => (u.kids.length
-    ? (info.get(u.kids[0].id).holes.size ? [...info.get(u.kids[0].id).holes.values()][0] : info.get(u.kids[0].id).outer)
+    ? ([...info.get(u.kids[0].id).holes.values()][0] || info.get(u.kids[0].id).outer)
     : u.holeOp);
 
-  while (remaining.size > 0) {
-    // 1) próxima peça mãe: a mais próxima do cabeçote
-    let nextHost = null, nd = Infinity;
-    for (const h of remaining) {
-      const units = unitsOf(h);
-      const d = units.length ? Math.min(...units.map((u) => opDist(pos, unitStartOp(u)))) : opDist(pos, info.get(h.id).outer);
-      if (d < nd) { nd = d; nextHost = h; }
-    }
-    remaining.delete(nextHost);
+  /** Gera a sequência completa para uma ORDEM de peças mães. */
+  function runSequence(order) {
+    const seq = [], rapids = [], usedPierces = [], finished = [], groups = [];
+    let pos = home, rapidLen = 0, cutLen = 0, crossings = 0, invalid = 0, narrow = 0;
+    const warn = new Set();
 
-    // 2) furos da mãe (cada um precedido por suas filhas In-Hole), sempre o mais próximo
-    const units = unitsOf(nextHost);
-    while (units.length > 0) {
-      let bi = 0, bd = Infinity;
-      units.forEach((u, i) => { const d = opDist(pos, unitStartOp(u)); if (d < bd) { bd = d; bi = i; } });
-      const u = units.splice(bi, 1)[0];
-      for (const kid of u.kids) {
-        for (const kh of info.get(kid.id).holes.values()) emit(kh);
-        emit(info.get(kid.id).outer);
+    const crossesFinished = (a, b) => {
+      if (skipCrossCheck || finished.length === 0) return false;
+      const sMinX = Math.min(a.x, b.x), sMaxX = Math.max(a.x, b.x);
+      const sMinY = Math.min(a.y, b.y), sMaxY = Math.max(a.y, b.y);
+      return finished.some((f) =>
+        f.box.minX <= sMaxX && f.box.maxX >= sMinX && f.box.minY <= sMaxY && f.box.maxY >= sMinY &&
+        segmentCrossesRing(a, b, f.ring));
+    };
+    const legCost = (a, b) => Math.hypot(b.x - a.x, b.y - a.y) + (crossesFinished(a, b) ? CROSS_PENALTY : 0);
+    const spacingPenalty = (c) => (usedPierces.some((u) => Math.hypot(u.x - c.pierce.x, u.y - c.pierce.y) < minPierceSpacing) ? 120 : 0);
+    const opDist = (p, op) => {
+      let m = Infinity;
+      for (const c of op.cands) m = Math.min(m, legCost(p, c.pierce));
+      return m;
+    };
+
+    const emit = (op) => {
+      if (op.cands.length === 0) { warn.add(`Sem ponto de perfuração para ${op.item.part.name}`); return; }
+      let best = null, bestScore = Infinity;
+      for (const c of op.cands) {
+        const sc = legCost(pos, c.pierce) - c.quality * 0.2 + spacingPenalty(c);
+        if (sc < bestScore) { bestScore = sc; best = c; }
       }
-      emit(u.holeOp);
+      const crosses = crossesFinished(pos, best.pierce);
+      rapids.push({ x1: pos.x, y1: pos.y, x2: best.pierce.x, y2: best.pierce.y, crossesCut: crosses });
+      rapidLen += Math.hypot(best.pierce.x - pos.x, best.pierce.y - pos.y);
+      if (crosses) crossings++;
+      if (best.invalid) { invalid++; warn.add(`Lead-in sem espaço livre validado em ${op.item.part.name}${op.kind === 'HOLE' ? ' (furo)' : ''}`); }
+      if (best.tier === 1) narrow++;
+      cutLen += op.perimeter;
+      seq.push({
+        seq: seq.length + 1, kind: op.kind, partId: op.item.id, partName: op.item.part.name, holeId: op.holeId,
+        entry: best.entry, pierce: best.pierce, leadPath: best.leadPath, leadType: best.leadType,
+        leadLen: best.leadLen, perimeter: +op.perimeter.toFixed(2), invalid: best.invalid || undefined,
+        zone: best.tier === 0 ? 'ABERTA' : 'ESTREITA'
+      });
+      usedPierces.push(best.pierce);
+      if (op.kind === 'OUTER') finished.push({ ring: op.ring, box: op.item.outerBox });
+      pos = best.entry;
+    };
+
+    for (const host of order) {
+      const startIdx = seq.length;
+      const units = unitsOf(host);
+      while (units.length > 0) {
+        let bi = 0, bd = Infinity;
+        units.forEach((u, i) => { const d = opDist(pos, unitStartOp(u)); if (d < bd) { bd = d; bi = i; } });
+        const u = units.splice(bi, 1)[0];
+        for (const kid of u.kids) {
+          for (const kh of info.get(kid.id).holes.values()) emit(kh);
+          emit(info.get(kid.id).outer);
+        }
+        emit(u.holeOp);
+      }
+      emit(info.get(host.id).outer);
+      if (seq.length > startIdx) {
+        groups.push({ host, start: seq[startIdx].pierce, end: seq[seq.length - 1].entry });
+      }
     }
-    // 3) contorno externo da mãe por último
-    emit(info.get(nextHost.id).outer);
+    return { seq, rapids, rapidLen, cutLen, crossings, invalid, narrow, warnings: warn, groups };
   }
 
-  // ordem de corte por peça (para rótulos e hover)
+  // 1) ordem inicial: vizinho mais próximo (distância simples ao ponto de perfuração mais próximo)
+  const nearestPierceDist = (p, host) => {
+    const units = unitsOf(host);
+    const ops = units.length ? units.map(unitStartOp) : [info.get(host.id).outer];
+    let m = Infinity;
+    for (const op of ops) for (const c of op.cands) m = Math.min(m, Math.hypot(c.pierce.x - p.x, c.pierce.y - p.y));
+    return m;
+  };
+  let order = [];
+  {
+    const rem = new Set(hosts);
+    let p = home;
+    while (rem.size) {
+      let nb = null, nd = Infinity;
+      for (const h of rem) { const d = nearestPierceDist(p, h); if (d < nd) { nd = d; nb = h; } }
+      rem.delete(nb); order.push(nb);
+      const ops = unitsOf(nb).map(unitStartOp);
+      const o = ops[0] || info.get(nb.id).outer;
+      if (o.cands[0]) p = o.cands[0].pierce;
+    }
+  }
+
+  // 2) Or-opt sobre a ordem das peças, usando os pontos reais de entrada/saída de cada grupo
+  let result = runSequence(order);
+  const MAX_OROPT_GROUPS = 80;
+  if (order.length > 2 && order.length <= MAX_OROPT_GROUPS) {
+    for (let pass = 0; pass < 4; pass++) {
+      const ends = new Map(result.groups.map((g) => [g.host, g]));
+      const cost = (ord) => {
+        let c = 0, prev = home;
+        for (const h of ord) { const g = ends.get(h); if (!g) continue; c += Math.hypot(g.start.x - prev.x, g.start.y - prev.y); prev = g.end; }
+        return c;
+      };
+      let improved = true, guard = 0;
+      let cur = order.slice(), curCost = cost(cur);
+      while (improved && guard++ < 50) {
+        improved = false;
+        for (let i = 0; i < cur.length; i++) {
+          const item = cur[i];
+          const rest = cur.slice(0, i).concat(cur.slice(i + 1));
+          for (let j = 0; j <= rest.length; j++) {
+            if (j === i) continue;
+            const cand = rest.slice(0, j).concat([item], rest.slice(j));
+            const cc = cost(cand);
+            if (cc < curCost - 1e-6) { cur = cand; curCost = cc; improved = true; break; }
+          }
+          if (improved) break;
+        }
+      }
+      const next = runSequence(cur);
+      if (next.rapidLen + next.crossings * CROSS_PENALTY < result.rapidLen + result.crossings * CROSS_PENALTY - 1e-6) {
+        result = next; order = cur;
+      } else break;
+    }
+  }
+
+  const { seq, rapids } = result;
+  for (const w of result.warnings) warnings.push(w);
+
   let k = 0;
   const orderByPart = new Map();
   for (const op of seq) if (op.kind === 'OUTER') orderByPart.set(op.partId, ++k);
@@ -415,10 +491,11 @@ function planCam(res, params) {
     warnings: [...new Set(warnings)].slice(0, 20),
     metrics: {
       pierceCount: seq.length,
-      cutLength: +cutLen.toFixed(1),
-      rapidLength: +rapidLen.toFixed(1),
-      rapidCrossings: crossings,
-      invalidLeads: invalid,
+      cutLength: +result.cutLen.toFixed(1),
+      rapidLength: +result.rapidLen.toFixed(1),
+      rapidCrossings: result.crossings,
+      invalidLeads: result.invalid,
+      narrowWebPierces: result.narrow,
       crossCheckSkipped: skipCrossCheck
     }
   };

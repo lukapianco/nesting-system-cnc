@@ -113,7 +113,17 @@ function normalizeNestingParams(rawConfig = {}) {
     lead_in_type: ['ARC', 'LINE_45', 'LINE_90'].includes(rawConfig.lead_in_type) ? rawConfig.lead_in_type : 'ARC',
     pierce_radius: Math.max(0, Number(rawConfig.pierce_radius ?? rawConfig.pierceRadius ?? 1.0)),
     hole_clearance: Math.max(0, Number(rawConfig.hole_clearance ?? rawConfig.holeClearance ?? 2.0)),
+    // PRECISE = retalhos com varredura fina em TODA avaliação; FAST = proxy rápido + varredura só nos promissores
+    // 0 = sem limite; >0 encerra a otimização ao atingir o tempo, mantendo o melhor resultado
+    time_limit_s: Math.max(0, Number(rawConfig.time_limit_s ?? 0)),
+    evaluation_mode: rawConfig.evaluation_mode === 'FAST' ? 'FAST' : 'PRECISE',
+    // fração dos genes de rotação (BRKGA) tratados como restritivos; o resto deixa o BLF escolher o melhor ângulo
+    angle_gene_strictness: Math.min(1, Math.max(0, Number(rawConfig.angle_gene_strictness ?? 0.3))),
     hole_clearance: Math.max(0, Number(rawConfig.hole_clearance ?? rawConfig.holeClearance ?? 2.0)),
+    // PRECISE = retalhos com varredura fina em TODA avaliação; FAST = proxy rápido + varredura só nos promissores
+    evaluation_mode: rawConfig.evaluation_mode === 'FAST' ? 'FAST' : 'PRECISE',
+    // fração dos genes de rotação (BRKGA) tratados como restritivos; o resto deixa o BLF escolher o melhor ângulo
+    angle_gene_strictness: Math.min(1, Math.max(0, Number(rawConfig.angle_gene_strictness ?? 0.3))),
     pierce_radius: Math.max(0, Number(rawConfig.pierce_radius ?? rawConfig.pierceRadius ?? 1.0)),
     lead_in_type: ['ARC', 'LINE_45', 'LINE_90'].includes(rawConfig.lead_in_type) ? rawConfig.lead_in_type : 'ARC',
     total_iterations: Math.max(50, Math.min(250000, Number(rawConfig.total_iterations ?? rawConfig.totalIterations ?? 15000))),

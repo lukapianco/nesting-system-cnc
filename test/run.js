@@ -8,6 +8,8 @@ const { buildDxf } = require('../dxfWriter');
 const cad = require('../cadParser');
 const { validateLayout } = require('../validator');
 const { normalizeNestingParams } = require('../typesAndInterfaces');
+const { recommendParams, PROCESSES } = require('../processProfiles');
+const { evaluate } = require('../bench/metrics');
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -170,6 +172,51 @@ const BASE = { sheetWidth: 180, sheetHeight: 120, kerf_width: 0.4, part_clearanc
     assert(lost.errors.some(e => e.type === 'PECA_PERDIDA'));
   });
 
+  console.log('\n[QUALIDADE] KPIs, modos e perfis');
+  const ROOMY = { ...BASE, sheetWidth: 1200, sheetHeight: 800, min_hole_size: 60, min_remnant_size: 100, total_iterations: 1500 };
+
+  await test('KPI "aproveitamento líquido" do motor coincide com a régua independente (raster)', async () => {
+    const r = await runPreset({ parts: 'trueshape', qty: 1, config: ROOMY });
+    const b = r.done.bestResult;
+    const m = evaluate(b, { gap: 6, margin: 6, minRemnant: 100 });
+    assert(Math.abs(m.netUtilPct - b.rawUtilization) < 0.1, `motor=${b.rawUtilization}% régua=${m.netUtilPct}%`);
+    // o retalho útil do motor não pode divergir mais de 5% da régua (antes a V5 inflava o KPI em ~15 pontos)
+    const engineRem = b.remnants.reduce((s, x) => s + x.area, 0);
+    assert(Math.abs(engineRem - m.usableRemnantMm2) / m.usableRemnantMm2 < 0.05, `retalho motor=${engineRem} régua=${m.usableRemnantMm2}`);
+  });
+
+  await test('limite de tempo encerra a otimização cedo e mantém um layout válido', async () => {
+    const r = await runPreset({ parts: 'industrial', qty: 1, config: { ...ROOMY, total_iterations: 500000, time_limit_s: 2 } });
+    assert(r.done.stoppedByTimeLimit, 'deveria ter parado por tempo');
+    assert(r.ms < 15000, `demorou ${r.ms} ms`);
+    assert(r.done.bestResult.validation.ok);
+  });
+
+  await test('perfurações: maioria em sucata aberta e deslocamento G00 coerente (kit industrial 1200x800)', async () => {
+    const r = await runPreset({ parts: 'industrial', qty: 1, config: ROOMY });
+    const m = r.done.bestResult.cam.metrics;
+    assert(m.narrowWebPierces <= Math.ceil(m.pierceCount * 0.4), `${m.narrowWebPierces}/${m.pierceCount} em alma estreita`);
+    assert(m.rapidCrossings <= 2, `${m.rapidCrossings} G00 sobre peça solta`);
+    assert(m.rapidLength < 3000, `G00 de ${m.rapidLength} mm`);
+  });
+
+  await test('perfis de processo: valores válidos, ponte cresce com a espessura e kerf do plasma > laser', () => {
+    for (const key of Object.keys(PROCESSES)) {
+      let prev = 0;
+      for (const t of [1, 3, 6, 12, 25]) {
+        const p = recommendParams(key, t).params;
+        for (const k of ['kerf_width', 'part_clearance', 'sheet_margin', 'lead_in_length', 'pierce_radius', 'hole_clearance', 'min_hole_size']) {
+          assert(Number.isFinite(p[k]) && p[k] > 0, `${key} t=${t} ${k}=${p[k]}`);
+        }
+        assert(p.part_clearance >= prev, `${key}: ponte diminuiu com a espessura`);
+        prev = p.part_clearance;
+      }
+    }
+    assert(recommendParams('PLASMA', 6).params.kerf_width > recommendParams('LASER_FIBRA', 6).params.kerf_width);
+    assert.throws(() => recommendParams('LASER_FIBRA', 0));
+    assert.throws(() => recommendParams('XYZ', 3));
+  });
+
   console.log('\n[SERVIDOR] HTTP + SSE + exportação');
   await test('upload → job → SSE → export-dxf devolve DXF lido pelo parser (e job com uploadId inválido dá 410)', async () => {
     process.env.PORT = '0';
@@ -202,6 +249,9 @@ const BASE = { sheetWidth: 180, sheetHeight: 120, kerf_width: 0.4, part_clearanc
       assert(parsed.entities.length > 5);
       const blocked = await fetch(`${base}/api/export-dxf`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ layout: { ...done.bestResult, validation: { ok: false, errors: [{ msg: 'x' }] } } }) });
       assert.strictEqual(blocked.status, 422, 'layout reprovado deve bloquear a exportação');
+      const prof = await (await fetch(`${base}/api/recommend-params?process=PLASMA&thickness=10`)).json();
+      assert(prof.params && prof.params.kerf_width > 1, 'endpoint de perfis');
+      assert.strictEqual((await fetch(`${base}/api/recommend-params?process=PLASMA&thickness=-1`)).status, 400);
     } finally { server.close(); }
   });
 

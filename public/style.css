@@ -692,3 +692,17 @@ body {
   background: #fffbeb;
   color: #92400e;
 }
+
+.profile-box {
+  border: 2px dashed var(--border);
+  background: #f0f9ff;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+.profile-notes {
+  font-size: 0.7rem;
+  color: #334155;
+  margin-top: 6px;
+  font-weight: 600;
+}

@@ -13,6 +13,7 @@ const { extractContoursFromDxf, buildCustomSheetFromContours, classifyPartsAndHo
 const { buildJob } = require('./jobBuilder');
 const { buildSampleDxf } = require('./presets');
 const { buildDxf } = require('./dxfWriter');
+const { recommendParams, listProcesses } = require('./processProfiles');
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024, files: 1 } });
@@ -215,6 +216,16 @@ app.get('/api/stream/:jobId', (req, res) => {
   res.flushHeaders?.();
 
   enqueueJob(job, res);
+});
+
+app.get('/api/process-profiles', (req, res) => res.json({ processes: listProcesses() }));
+
+app.get('/api/recommend-params', (req, res) => {
+  try {
+    res.json(recommendParams(String(req.query.process || ''), Number(req.query.thickness), { toolDiameter: Number(req.query.toolDiameter) }));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // Exportação DXF gerada no servidor (testável; R12 universal, sem espelhamento, em ordem de corte)

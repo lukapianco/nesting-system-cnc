@@ -80,6 +80,41 @@
       <!-- 3. PARÂMETROS MANDATÓRIOS DE ENGENHARIA CAM -->
       <section class="panel-card">
         <h2>3. Parâmetros Físicos CAM & Motor BRKGA</h2>
+
+        <div class="profile-box">
+          <div class="form-grid">
+            <div class="input-group">
+              <label for="processSelect" title="Carrega valores iniciais de kerf, ponte, margem, lead-in e cratera">Processo de Corte</label>
+              <select id="processSelect" class="select-input">
+                <option value="">— manual —</option>
+              </select>
+            </div>
+            <div class="input-group">
+              <label for="thicknessInput">Espessura (mm)</label>
+              <input type="number" id="thicknessInput" value="3" min="0.1" step="0.5" />
+            </div>
+          </div>
+          <button id="btnApplyProfile" type="button" class="btn btn-outline full-width btn-sm">Aplicar valores iniciais do processo</button>
+          <p id="profileNotes" class="profile-notes"></p>
+        </div>
+
+        <div class="input-group" style="margin-bottom: 10px;">
+          <label for="qualityModeSelect" title="Define o orçamento de busca. Regra do produto: qualidade antes de velocidade.">Modo de Qualidade</label>
+          <select id="qualityModeSelect" class="select-input">
+            <option value="RASCUNHO">Rascunho — 3.000 aval., proxy rápido (conferir ideia)</option>
+            <option value="PADRAO" selected>Padrão — 15.000 aval., avaliação precisa</option>
+            <option value="PRODUCAO">Produção — 60.000 aval., avaliação precisa</option>
+            <option value="MANUAL">Manual — usar o campo "Avaliações"</option>
+          </select>
+        </div>
+
+        <div class="form-grid">
+          <div class="input-group">
+            <label for="timeLimitInput" title="0 = sem limite. Ao atingir, encerra e mantém o melhor layout.">Tempo Máx. (s)</label>
+            <input type="number" id="timeLimitInput" value="0" min="0" step="10" />
+          </div>
+        </div>
+
         <div class="form-grid">
           <div class="input-group">
             <label for="sheetWidth">Largura Chapa X (mm)</label>
@@ -216,6 +251,8 @@
           <strong class="kpi-value" id="kpiUtilization">0.0%</strong>
         </div>
         <div class="metrics-list">
+          <div class="metric-item"><span title="Área líquida de peças ÷ área líquida da chapa inteira">Aproveitamento Líquido (chapa inteira):</span><strong id="metricNetUtil">0%</strong></div>
+          <div class="metric-item"><span title="Maior retângulo livre que atende o Retalho Mín.">Maior Retalho Útil:</span><strong id="metricLargestRemnant">—</strong></div>
           <div class="metric-item"><span>Área Líquida da Chapa:</span><strong id="metricSheetArea">0 cm²</strong></div>
           <div class="metric-item"><span>Área Útil de Peças:</span><strong id="metricUsedArea">0 cm²</strong></div>
           <div class="metric-item"><span>Peças Alocadas do Lote:</span><strong id="metricPlacedCount">0 / 0</strong></div>
