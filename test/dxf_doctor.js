@@ -43,6 +43,12 @@ function maxDeviation(samples, ring) {
     const buf = Buffer.concat([Buffer.from('AutoCAD Binary DXF\r\n\x1a\x00', 'latin1'), Buffer.alloc(50, 0)]);
     assert.throws(() => readDxf(buf), e => e.code === 'BINARY_DXF');
   });
+  await test('conteúdo depois de "0 EOF" é ignorado com aviso (antes: "DXF corrompido"; achado no corpus público)', () => {
+    const txt = S.buildDxf({ insunits: 4, entities: [S.rect(0, 0, 50, 20)] }) + 'ignore\ninvalid\ndata\nbeyond\nEOF\n';
+    const doc = readDxf(txt);
+    assert(doc.warnings.some(w => w.code === 'TRAILING_DATA'), 'sem aviso TRAILING_DATA');
+    assert(!doc.warnings.some(w => w.code === 'NO_EOF'));
+  });
   await test('vazio, PDF e texto qualquer → erros EMPTY / NOT_DXF / BAD_GROUP_CODE', () => {
     assert.throws(() => readDxf(Buffer.alloc(0)), e => e.code === 'EMPTY');
     assert.throws(() => readDxf(Buffer.from('%PDF-1.7 ...')), e => e.code === 'NOT_DXF');

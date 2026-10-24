@@ -55,6 +55,11 @@ try { ({ chromium } = require('playwright')); } catch (_) { console.log('  - pla
     assert(/APROVADO/.test(await text('#metricValidation')));
     assert(!(await page.isDisabled('#btnExportDxf')));
   });
+  await check('motor usado aparece na tela (sparrow instalado → "Otimizador sparrow"; senão, aviso de não instalado)', async () => {
+    const hw = await (await fetch(base + '/api/hardware')).json();
+    if (hw.externalOptimizer && hw.externalOptimizer.installed) assert(/Otimizador sparrow/.test(await text('#progressStatusText')), await text('#progressStatusText'));
+    else assert(/não instalado/.test(await text('#engineStatus')), await text('#engineStatus'));
+  });
   // camadas das entidades do DXF baixado (código de grupo 8 depois de ENTITIES)
   const entityLayers = (txt) => {
     const L = txt.split(/\r?\n/), s = L.findIndex((l, i) => l.trim() === 'ENTITIES' && L[i - 1].trim() === '2');

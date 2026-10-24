@@ -30,7 +30,7 @@ async function runCase(label, c) {
   const rows = [];
   for (const version of c.versions) {
     for (let seed = 1; seed <= c.seeds; seed++) {
-      const cfg = { ...c.config, seed_offset: seed, total_iterations: c.iterations, ...(c.extra && c.extra[version] || {}) };
+      const cfg = { engine: 'CLASSICO', ...c.config, seed_offset: seed, total_iterations: c.iterations, ...(c.extra && c.extra[version] || {}) };
       let r, layoutOf, reported;
       if (version === 'V5') {
         const T = require(`${V5}/typesAndInterfaces`), C = require(`${V5}/cadParser`);

@@ -112,6 +112,11 @@ function tokenize(text, warnings) {
     }
     codes.push(parseInt(cl, 10));
     values.push(lines[i + 1]);
+    // "0 / EOF" encerra o DXF: o que vier depois (lixo de editor, outro arquivo colado) é ignorado, como no AutoCAD
+    if (codes[codes.length - 1] === 0 && values[values.length - 1].trim() === 'EOF') {
+      if (lines.slice(i + 2).some(l => l.trim() !== '')) warnings.push({ code: 'TRAILING_DATA', message: 'Há conteúdo depois do marcador EOF; foi ignorado.' });
+      break;
+    }
   }
   if (!codes.length) throw new DxfReadError('NOT_DXF', 'Nenhum par código/valor encontrado: o arquivo não parece ser DXF.');
   if (codes[codes.length - 1] !== 0 || values[values.length - 1].trim() !== 'EOF') {

@@ -9,7 +9,7 @@
 <body>
   <header class="top-bar">
     <div class="brand">
-      <span class="badge-tag">PRUMO 5.4</span>
+      <span class="badge-tag">PRUMO 5.5</span>
       <h1>PRUMO — NESTING DE PRECISÃO · BANCADA DE TESTES DO MOTOR</h1>
     </div>
     <div class="header-actions">
@@ -152,6 +152,16 @@
             <option value="PRODUCAO">Produção — 60.000 aval., avaliação precisa</option>
             <option value="MANUAL">Manual — usar o campo "Avaliações"</option>
           </select>
+        </div>
+
+        <div class="input-group" style="margin-bottom: 10px;">
+          <label for="engineSelect" title="Automático usa o otimizador sparrow (minimização de sobreposição + compressão da faixa) quando ele está instalado e se aplica ao job; senão, o motor clássico.">Motor de posicionamento</label>
+          <select id="engineSelect" class="select-input">
+            <option value="AUTO" selected>Automático (sparrow quando disponível)</option>
+            <option value="SPARROW">Otimizador sparrow</option>
+            <option value="CLASSICO">Clássico (BRKGA + BLF)</option>
+          </select>
+          <p id="engineStatus" class="profile-notes"></p>
         </div>
 
         <div class="form-grid">

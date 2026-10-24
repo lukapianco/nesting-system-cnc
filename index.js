@@ -13,6 +13,7 @@ const { normalizeNestingParams } = require('./typesAndInterfaces');
 const { buildJob } = require('./jobBuilder');
 const { buildSampleDxf } = require('./presets');
 const { buildDxf, buildRemnantsDxf } = require('./dxfWriter');
+const { findSparrowBinary } = require('./engine/sparrowBridge');
 const { recommendParams, listProcesses } = require('./processProfiles');
 
 const app = express();
@@ -182,7 +183,11 @@ function checkQueue() {
 // =========================================================
 // 3. ROTAS HTTP + STREAM SSE
 // =========================================================
-app.get('/api/hardware', (req, res) => res.json({ ...HARDWARE, activeWorkers, queueSize: jobQueue.length }));
+app.get('/api/hardware', (req, res) => res.json({
+  ...HARDWARE, activeWorkers, queueSize: jobQueue.length,
+  // otimizador externo (ADR 006): instalado = o motor Automático usa o sparrow quando ele se aplica
+  externalOptimizer: { name: 'prumo-sparrow', installed: !!findSparrowBinary() }
+}));
 
 app.post('/api/upload-dxf', upload.single('dxfFile'), (req, res) => {
   try {

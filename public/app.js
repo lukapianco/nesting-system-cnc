@@ -78,10 +78,11 @@ const btnStopKeepBest = document.getElementById('btnStopKeepBest');
 
 // Regra do produto: qualidade > velocidade. O modo define o ORÇAMENTO de busca, nunca a correção do resultado.
 const QUALITY_MODES = {
-  RASCUNHO: { iterations: 3000, evaluation_mode: 'FAST' },
-  PADRAO: { iterations: 15000, evaluation_mode: 'PRECISE' },
-  PRODUCAO: { iterations: 60000, evaluation_mode: 'PRECISE' }
+  RASCUNHO: { iterations: 3000, evaluation_mode: 'FAST', external_time_s: 10 },
+  PADRAO: { iterations: 15000, evaluation_mode: 'PRECISE', external_time_s: 30 },
+  PRODUCAO: { iterations: 60000, evaluation_mode: 'PRECISE', external_time_s: 120 }
 };
+const engineSelect = document.getElementById('engineSelect');
 
 const allowRotationInput = document.getElementById('allowRotation');
 const enableInHoleInput = document.getElementById('enableInHole');
@@ -117,6 +118,10 @@ async function refreshHardwareStatus() {
       `<strong>CPU:</strong> ${hw.cpuModel} (${hw.totalCores} threads)<br>` +
       `<strong>Worker Pool VPS:</strong> Máx ${hw.maxWorkers} simultâneos (Ativos: ${hw.activeWorkers} | Fila: ${hw.queueSize})<br>` +
       `<strong>Aceleração:</strong> ${hw.gpu.name}`;
+    const ext = hw.externalOptimizer || {};
+    document.getElementById('engineStatus').textContent = ext.installed
+      ? 'Otimizador sparrow instalado neste servidor.'
+      : 'Otimizador sparrow não instalado: o Automático usa o motor clássico.';
   } catch (_) {}
 }
 
@@ -559,6 +564,8 @@ async function startBackendSseOptimization() {
     total_iterations: (QUALITY_MODES[qualityModeSelect.value] || {}).iterations || Number(iterationsInput.value) || 15000,
     evaluation_mode: (QUALITY_MODES[qualityModeSelect.value] || {}).evaluation_mode || 'PRECISE',
     time_limit_s: Number(timeLimitInput.value) || 0,
+    engine: engineSelect.value,
+    external_time_s: (QUALITY_MODES[qualityModeSelect.value] || {}).external_time_s || 30,
     allow_rotation: allowRotationInput.checked,
     grain_restriction: grainRestrictionSelect.value,
     hole_filling: enableInHoleInput.checked,
@@ -620,8 +627,13 @@ async function startBackendSseOptimization() {
       const pct = Math.round((msg.fraction ?? (msg.iter / msg.totalIterations)) * 100);
       progressBarFill.style.width = `${pct}%`;
       progressPercentText.textContent = `${pct}%`;
-      progressStatusText.textContent = `BRKGA + SA: ${msg.iter.toLocaleString()} de ${msg.totalIterations.toLocaleString()} avaliações BLF...`;
-      progressStrategyText.textContent = `Taxa: ${msg.calcPerSec.toLocaleString()} layouts/seg | Workers: ${msg.activeWorkers}/${msg.maxWorkers}`;
+      if (msg.engine === 'SPARROW') {
+        progressStatusText.textContent = `Otimizador sparrow: ${msg.improvements.toLocaleString()} melhoria(s) que cabem na chapa…`;
+        progressStrategyText.textContent = `Separação + compressão da faixa | Workers: ${msg.activeWorkers}/${msg.maxWorkers}`;
+      } else {
+        progressStatusText.textContent = `BRKGA + SA: ${msg.iter.toLocaleString()} de ${msg.totalIterations.toLocaleString()} avaliações BLF...`;
+        progressStrategyText.textContent = `Taxa: ${msg.calcPerSec.toLocaleString()} layouts/seg | Workers: ${msg.activeWorkers}/${msg.maxWorkers}`;
+      }
 
       if (msg.bestResult) {
         bestSolutionGlobal = msg.bestResult;
@@ -642,8 +654,16 @@ async function startBackendSseOptimization() {
       currentArchive = msg.topArchive || [];
       progressBarFill.style.width = '100%';
       progressPercentText.textContent = '100%';
-      progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Avaliações ${msg.stoppedByUser ? '(parado pelo usuário — melhor layout mantido)' : msg.stoppedByTimeLimit ? '(limite de tempo atingido)' : 'Concluídas'} em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
-      progressStrategyText.textContent = `Velocidade Média: ${msg.calcPerSec.toLocaleString()} layouts/seg`;
+      const endState = msg.stoppedByUser ? '(parado pelo usuário — melhor layout mantido)' : msg.stoppedByTimeLimit ? '(limite de tempo atingido)' : 'Concluídas';
+      if (msg.engine === 'SPARROW') {
+        progressStatusText.textContent = `Otimizador sparrow: ${msg.improvements.toLocaleString()} melhoria(s) ${endState} em ${(msg.totalTimeMs / 1000).toFixed(1)}s`;
+        progressStrategyText.textContent = 'Separação + compressão da faixa; layout conferido pelo validador independente';
+      } else {
+        progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Avaliações ${endState} em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
+        progressStrategyText.textContent = msg.engineNote
+          ? `Motor clássico: ${msg.engineNote}`
+          : `Velocidade Média: ${msg.calcPerSec.toLocaleString()} layouts/seg`;
+      }
       if (!bestSolutionGlobal) { progressBestText.textContent = 'Nenhum layout gerado.'; return; }
       progressBestText.textContent = `Campeão Travado: ${bestSolutionGlobal.compactUtilization}%`;
 

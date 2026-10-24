@@ -1,0 +1,35 @@
+[package]
+name = "prumo-sparrow"
+version = "0.3.0-prumo.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+description = "sparrow 0.3.0 (MIT, Jeroen Gardeyn / KU Leuven) adaptado como otimizador externo do Prumo. Ver PRUMO_MODIFICACOES.md"
+
+[lib]
+name = "sparrow"
+path = "src/lib.rs"
+
+[[bin]]
+name = "prumo-sparrow"
+path = "src/main.rs"
+
+[dependencies]
+jagua-rs = { path = "../jagua-rs", features = ["spp"] }
+rand = { version = "0.10", default-features = false, features = ["std"] }
+rand_distr = "0.6"
+itertools = "0.15"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tap = "1.0"
+slotmap = "1.1"
+float-cmp = "0.10"
+ordered-float = "5.5"
+rayon = "1.12"
+anyhow = "1.0"
+clipper2-rust = "1.2"
+
+[features]
+simd = []
+

@@ -1,145 +1,119 @@
-# ⚙️ DXF Nesting Industrial True-Shape (CAD/CAM Engine V5.2)
+# Prumo — motor de nesting 2D
 
-![Node.js](https://img.shields.io/badge/Node.js-18%2B-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)
-![Express](https://img.shields.io/badge/Express-Backend%20SSE-000000?style=for-the-badge&logo=express&logoColor=white)
-![Rust](https://img.shields.io/badge/Rust-Wasm%20Optional-DEA584?style=for-the-badge&logo=rust&logoColor=black)
-![HTML5 Canvas](https://img.shields.io/badge/HTML5-Canvas%202D-E34F26?style=for-the-badge&logo=html5&logoColor=white)
+O Prumo recebe peças desenhadas em DXF, encaixa as peças na chapa pelo **contorno real** (*true shape*) e devolve:
 
-Sistema web de **Nesting 2D Industrial (CAD/CAM)** para otimização de planos de corte em chapas metálicas (Laser, Plasma, Oxicorte e Jato d'Água) a partir de arquivos vetoriais `.DXF`[cite: 5, 14].
+- o plano de corte;
+- os retalhos que sobram;
+- a ordem de corte com entradas de corte (lead-in);
+- um DXF pronto para o CAM da máquina.
 
-O motor realiza o processamento geométrico pesado 100% no **Backend via `worker_threads`** (alcançando de **25.000 a 65.000+ simulações por segundo**), transmite o progresso em tempo real via **SSE (Server-Sent Events)**, aproveita furos internos para alocar peças menores (**Nesting In-Hole**), mapeia retalhos padronizados para estoque e exporta o arquivo `.DXF` final pronto para a máquina CNC[cite: 14, 15].
+Serve para laser, plasma, oxicorte, jato d'água e router.
 
----
+O escopo é **só o nesting**. Estoque de chapas, ordens de serviço e rastreio de sobras ficam no sistema de gestão, que conversa com o Prumo pela API.
 
-## 🎯 Principais Funcionalidades
+> Versão atual: **5.5** — veja o [CHANGELOG](CHANGELOG.md).
+## O que ele faz
 
-* **Processamento Multi-Thread no Servidor (`worker_threads` + Fila FIFO):** O navegador atua apenas como terminal visual leve (zero cálculo pesado no cliente)[cite: 14, 16]. O servidor gerencia um pool de threads limitado a `N - 1` núcleos da VPS para suportar múltiplos usuários simultâneos sem travar o Event Loop[cite: 16].
-* **Leitura e Costura Automática de `.DXF`:** Interpreta entidades `LWPOLYLINE`, `POLYLINE`, `CIRCLE` e costura linhas soltas (`LINE`) conectadas pelas extremidades, convertendo-as em polígonos fechados[cite: 5, 16].
-* **Suporte a Chapa Principal por Medidas ou via `.DXF` Customizado:** Permite definir chapas retangulares (`Largura X` / `Altura Y`) ou enviar o desenho `.DXF` de uma chapa irregular/recortada (ex.: chapa em formato de "L" ou degrau)[cite: 14, 15].
-* **Nesting In-Hole Sincronizado (Sem Duplicação de Furos):** Furos internos grandes nunca são duplicados fora da peça[cite: 14]. Eles atuam como "sub-chapas gratuitas" onde peças menores do próprio pedido são encaixadas (girando 90° sincronizadamente com a peça mãe) ou são contabilizados como buchas/miolos gerados a custo zero[cite: 14, 17].
-* **Colisão Poligonal True-Shape:** Permite encaixar peças dentro de recortes côncavos (peças em "L", chanfros e diagonais) combinando decomposição de caixas sólidas, interseção de segmentos e distância mínima ponto-aresta[cite: 14, 17].
-* **Extração de Retalhos Padronizados (Sobras Úteis):** Subdivide a área livre restante da chapa em retângulos e quadrados disjuntos (sem sobreposição) para reaproveitamento futuro no estoque[cite: 8, 14].
-* **Corte Comum (*Common-Line Cutting*):** Opção para colapsar o espaçamento (`Kerf`) para a espessura do feixe de laser (`0.4 mm`) onde duas paredes retas paralelas se encontram[cite: 9, 15].
-* **Exportação `.DXF` Multi-Layer (Escala 1:1 mm):** Gera o arquivo `.DXF` final separado em camadas (`0_CHAPA_LIMITE`, `1_CORTE_PECAS`, `1_PECA_IN_HOLE`, `2_CORTE_FUROS` e opcionalmente `3_RETALHOS_UTEIS`)[cite: 9, 15].
+| Área | O que o Prumo entrega |
+|---|---|
+| **Leitura de DXF** ("DXF Doctor") | Lê blocos aninhados e matrizes, elipses, splines, polilinhas com arco, unidades (`$INSUNITS`) e camadas auxiliares (cota, texto, eixo…). Costura linhas soltas e fecha aberturas pequenas, sempre avisando onde. Detecta a moldura (a chapa desenhada em volta das peças) e transforma cópias idênticas em quantidade. Cada problema vem num relatório com a coordenada. |
+| **Encaixe** | Dois motores. O **otimizador sparrow** (padrão quando instalado) minimiza a sobreposição e comprime as peças contra uma ponta da chapa. O **motor clássico** (BRKGA + BLF) atende chapa desenhada e lote maior que a chapa. Os dois giram as peças conforme a restrição de fibra. O Part-in-Part (peça dentro do furo de outra) vale nos dois. |
+| **Validação independente** | Todo layout passa por um validador que não usa código do motor. Ele confere sobreposição, folga entre peças, margem e furos da chapa, filhas dentro do furo, retalhos, ângulo de fibra e perfuração em sucata. Layout reprovado não é exportado. |
+| **Retalhos** | Retângulos úteis na sobra, com a mesma folga das peças, para ir para o estoque. |
+| **CAM** | Ordem de corte de dentro para fora, lead-in em arco ou reta, perfuração conferida em sucata e deslocamentos G00. |
+| **Exportação** | DXF R12 em mm. Por padrão leva **só a geometria de corte**, porque outros sistemas leem esse arquivo; chapa, retalhos, lead-ins e nomes são opcionais. O formato está em [`docs/FORMATO_DXF_EXPORTADO.md`](docs/FORMATO_DXF_EXPORTADO.md). |
 
----
+## Como instalar
 
-## 📂 Estrutura do Projeto
+### Requisitos
 
-```text
-dxf-nesting-app/
-├── package.json              # Dependências do projeto (express, multer, dxf-parser)
-├── server.js                 # API Gateway, Parser DXF, Fila de Workers e Stream SSE
-├── nestingWorker.js          # Motor Matemático em Worker Thread (In-Hole, True-Shape, Retalhos)
-├── rust-engine/              # (Opcional) Acelerador geométrico em Rust p/ WebAssembly
-│   ├── Cargo.toml            # Manifesto Rust e configuração wasm-bindgen
-│   └── src/lib.rs            # Rotinas de ponto-em-polígono em Rust
-└── public/
-    ├── index.html            # Interface CAD/CAM Neo-Brutalista
-    ├── style.css             # Estilização visual e layout
-    └── app.js                # Cliente SSE, Renderizador Canvas 2D e Exportador DXF
+- **Node.js 18 ou mais novo.**
+- **Rust 1.90 ou mais novo** — só para compilar o otimizador sparrow (recomendado).
+
+### Passos
+
+```bash
+npm install
+npm run build:sparrow     # opcional e recomendado: compila native/prumo-sparrow (uns 2 min na 1ª vez)
+npm start                 # http://localhost:3000
 ```
 
----
+### Sem o Rust
 
-## 🚀 Como Instalar e Executar
+O Prumo funciona igual com o motor clássico, e a tela avisa que o sparrow não está instalado.
 
-### Pré-requisitos
-* **Node.js** v18 LTS ou superior[cite: 14].
-* *(Opcional)* **Rust + `wasm-pack`** caso deseje compilar o módulo complementar `rust-engine`[cite: 14].
+Se o executável estiver em outro lugar, aponte com a variável de ambiente `PRUMO_SPARROW_BIN`.
 
-### Passo a Passo
+## Como usar (bancada de testes)
 
-1. Clone o repositório e instale as dependências[cite: 14]:
-   ```bash
-   git clone [https://github.com/seu-usuario/dxf-nesting-app.git](https://github.com/seu-usuario/dxf-nesting-app.git)
-   cd dxf-nesting-app
-   npm install express multer dxf-parser
-   ```
+1. **Peças:** envie o `.dxf` ou carregue um dos exemplos. O painel *Diagnóstico do DXF* mostra o que foi lido, o que foi ignorado e por quê.
+2. **Chapa:** informe largura × altura, ou envie o DXF de uma chapa irregular. Se o desenho tiver moldura, a chapa já vem ajustada.
+3. **Parâmetros:**
+   - processo e espessura (sugerem kerf e folgas);
+   - margem;
+   - fibra;
+   - modo de qualidade (define o tempo de busca);
+   - motor (Automático, sparrow ou clássico).
+4. **Resultado:**
+   - acompanhe o melhor layout ao vivo;
+   - **Parar e manter o melhor** encerra quando quiser;
+   - compare as alternativas;
+   - baixe o **DXF de corte** ou o **DXF dos retalhos**.
 
-2. *(Opcional)* Para compilar o acelerador em Rust para WebAssembly[cite: 15]:
-   ```bash
-   cd rust-engine
-   wasm-pack build --target nodejs
-   cd ..
-   ```
-   > **Nota:** Se você não compilar a pasta `rust-engine`, o `nestingWorker.js` detecta automaticamente e executa 100% dos cálculos no motor V8 nativo do Node.js sem qualquer perda de funcionalidade[cite: 15].
+## API
 
-3. Inicie o servidor[cite: 15]:
-   ```bash
-   node server.js
-   ```
+| Método | Rota | Para quê |
+|---|---|---|
+| `GET` | `/api/hardware` | CPU, workers, fila e se o otimizador sparrow está instalado |
+| `POST` | `/api/upload-dxf` | Lê o DXF de peças (`multipart`, campo `dxfFile`) e devolve peças, furos, cópias, molduras e diagnóstico |
+| `POST` | `/api/reanalyze-dxf` | Relê o último arquivo com outras opções de importação (camadas, moldura, unidade) |
+| `POST` | `/api/upload-sheet-dxf` | Lê o DXF de uma chapa irregular (com furos/defeitos) |
+| `POST` | `/api/start-job` | Cria o job (`uploadId`, `config`, `quantities`) e devolve o `jobId` |
+| `GET` | `/api/stream/:jobId` | Progresso em tempo real (SSE): `queued`, `progress`, `done`, `error` |
+| `POST` | `/api/stop/:jobId` | Para e entrega o melhor layout já validado |
+| `GET` | `/api/process-profiles`, `/api/recommend-params` | Perfis de processo e parâmetros sugeridos |
+| `POST` | `/api/export-dxf` | DXF de corte (opções de camadas no corpo) |
+| `POST` | `/api/export-remnants-dxf` | DXF só dos retalhos |
+| `GET` | `/api/sample-dxf?preset=` | DXF de exemplo (`icamento`, `trueshape`, `industrial`, chapas `sheet_*`) |
 
-4. Acesse no navegador[cite: 15]:
-   ```text
-   http://localhost:3000
-   ```
+Erros de arquivo respondem **422**, com a mensagem em português. A especificação completa, com exemplos e regras para quem integra, está no plano (fase 4).
 
----
+## Testes e benchmark
 
-## 🖥️ Como Usar a Aplicação
+```bash
+npm test                  # regressão, DXF Doctor, unidades do motor, otimizador sparrow (se compilado)
+npm run test:ui           # interface real no Chromium (precisa do Playwright)
+bash bench/public/fetch-instances.sh                         # baixa as 13 instâncias públicas (ESICUP)
+node bench/public/run.js --time 60 --seeds 5                 # motor clássico
+node bench/public/run.js --engine sparrow --time 60 --seeds 5
+```
 
-1. **Carregar as Peças de Corte (`.DXF`):**
-   * No painel lateral **1. Arquivos .DXF**, clique no primeiro campo para enviar seu arquivo `.dxf` ou escolha um dos **3 exemplos industriais prontos** na barra superior e clique em **Carregar Peças**[cite: 15].
-2. **Definir a Chapa Principal:**
-   * **Modo Retangular:** Informe a **Largura Chapa X (mm)** e **Altura Chapa Y (mm)** no painel lateral[cite: 15].
-   * **Modo Chapa Desenhada (`.DXF`):** Envie um arquivo `.dxf` com o formato exato do retalho/chapa disponível no segundo campo (roxo) ou clique em **Testar Chapa Desenhada (Formato L/Degrau)** no topo[cite: 15].
-3. **Configurar Parâmetros de Engenharia:**
-   * **Distância / Kerf (mm):** Espaçamento mínimo de segurança entre peças (largura do feixe + ponte térmica)[cite: 6, 15].
-   * **Furo Mín. Útil (mm):** Menor dimensão (`Largura` e `Altura`) para que um furo interno possa receber peças menores lá dentro (*Nesting In-Hole*) ou ter seu miolo contabilizado como aproveitável[cite: 15].
-   * **Retalho Mín. Chapa (mm):** Menor medida lateral para demarcar sobras retangulares/quadradas na chapa[cite: 15].
-   * **Nº de Cálculos (Worker):** Quantidade de iterações executadas na thread do servidor (ex.: `20000` a `100000`)[cite: 15].
-   * **Critério do Juiz:** Escolha se o otimizador deve priorizar **Maior % de Aproveitamento**, **Maior Retalho Único Inteiro** ou **Menor Caixa Ocupada**.
-4. **Inspecionar e Exportar:**
-   * Acompanhe a barra de progresso em tempo real e alterne entre os **6 melhores layouts distintos** nos botões abaixo do canvas[cite: 16].
-   * Na seção **3. Exportar .DXF p/ Máquina**, escolha se deseja manter ou omitir as linhas dos retalhos úteis e clique em **Baixar .DXF Final do Nesting**[cite: 15].
+O benchmark mede a densidade e a validade **fora do motor**: polígonos posicionados, validador independente e contagem de peças. As tabelas estão no CHANGELOG e em `bench/public/results/`. O protocolo está nas ADRs 005 e 006.
 
----
+## Estrutura
 
-## 🧠 Lógica Matemática e Algoritmos Utilizados
+```text
+index.js              servidor HTTP, fila de workers, SSE, exportação
+nestingWorker.js      orquestra o encaixe de um job (motor clássico + ponte para o sparrow)
+engine/               colisão exata indexada; ponte para o otimizador externo
+native/prumo-sparrow/ otimizador sparrow + jagua-rs (Rust, código completo; ver PRUMO_MODIFICACOES.md)
+dxf/                  DXF Doctor (leitor, curvas, diagnóstico)
+geometry/             primitivas geométricas compartilhadas
+cadParser.js          contornos → peças e furos; cópias → quantidade
+validator.js          validador independente
+camPlanner.js         ordem de corte, lead-in, perfuração
+dxfWriter.js          exportação DXF
+public/               bancada de testes (HTML + JS, sem build)
+test/, bench/         testes e benchmarks
+docs/                 manual, ADRs, diário de bordo, formato do DXF exportado
+```
 
-### 1. Identificação Topológica de Peças vs. Furos (*Ray-Casting*)
-Arquivos `.DXF` entregam entidades geométricas soltas sem hierarquia explícita[cite: 7]. O `server.js` ordena todos os contornos fechados da maior caixa delimitadora (*Bounding Box*) para a menor e dispara uma semirreta horizontal a partir dos vértices internos (`isPointInPolygon`)[cite: 7].
-* Pelo **Teorema da Curva de Jordan (Par/Ímpar)**[cite: 7]:
-  * Contornos contidos dentro de um número **par** (`0, 2...`) de polígonos maiores são classificados como **Peças Principais**[cite: 7].
-  * Contornos contidos dentro de um número **ímpar** (`1, 3...`) são classificados como **Furos Internos** da peça ancestral direta[cite: 7].
+## Licenças
 
-### 2. Nesting In-Hole com Sincronia Matricial de 90°
-Antes de alocar peças na chapa principal, a função `tryNestingInHoles()` verifica todos os furos internos que atingem o `Furo Mín. Útil`[cite: 15, 17].
-* Descontando `2 * Kerf` das dimensões internas do furo, se uma peça menor do próprio pedido couber lá dentro (a `0°` ou `90°`), ela é alocada dentro do furo da peça mãe[cite: 17].
-* Caso a peça mãe sofra rotação de `90°` ao entrar na chapa principal, a peça filha sofre automaticamente a mesma transformação ortogonal[cite: 17]:
-  ```text
-  rotRelX = child.relYInHost
-  rotRelY = host.width - (child.relXInHost + child.basePlacedWidth)
-  ```
-  invertendo suas dimensões (`placedWidth` ↔ `placedHeight`) e rotacionando seus vértices para manter-se perfeitamente centralizada no furo[cite: 17].
+Os componentes de terceiros e suas obrigações estão em [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md):
 
-### 3. Alocação MaxRects + Decomposição Côncava + Colisão True-Shape
-A cada iteração do `nestingWorker.js`:
-1. **Decomposição de Peças em "L" (`getSolidBoxesForPart`):** Peças côncavas de 6 vértices são subdivididas em suas 2 pernas retangulares sólidas exatas ao atualizar a lista de espaços livres (`freeRects`), liberando o vão vazio do "L" para outras peças[cite: 17].
-2. **Colisão Poligonal Completa (`polygonsCollideTrueShape`):** Verifica 4 condições geométricas entre pares de peças[cite: 17]:
-   * Filtro rápido por *Axis-Aligned Bounding Box (AABB)*[cite: 17];
-   * Inclusão de vértices e pontos médios de arestas (`isPointInPoly`)[cite: 17];
-   * Cruzamento vetorial entre segmentos de reta (`segmentsIntersect`)[cite: 17];
-   * Distância perpendicular mínima ponto-segmento (`pointToSegmentDistSq < gap²`)[cite: 17].
-3. **Compactação Gravitacional (*Shake-Down 2D*):** As peças posicionadas deslizam em passos sucessivos nos eixos `X` e `Y` até encostar no limite do `Kerf` (ou na largura do feixe de `0.4 mm` com **Corte Comum** ativo)[cite: 8, 15].
+- **sparrow:** MIT;
+- **jagua-rs:** MPL-2.0;
+- **Clipper2:** Boost.
 
-### 4. Extração Guilhotina de Retalhos Padronizados e Cálculo de Aproveitamento
-Após compactar todas as peças, a área livre restante da chapa é fatiada iterativamente (`extractStandardRemnants`): seleciona-se o maior retângulo livre válido (`>= Retalho Mín.`), registra-se o bloco como retalho padronizado e subtrai-se sua caixa do espaço livre para garantir **zero sobreposição**[cite: 8].
-
-O índice principal (**Aproveitamento na Área Consumida**) mede a eficiência real descontando a matéria-prima salva em retalhos padronizados[cite: 8]:
-
-$$\text{Aproveitamento (\%)} = \left( \frac{\text{Área Útil das Peças}}{\text{Área Total da Chapa} - \text{Soma dos Retalhos Padronizados}} \right) \times 100$$
-
----
-
-## 🔌 Endpoints da API
-
-| Método | Rota | Descrição |
-| :--- | :--- | :--- |
-| `GET` | `/api/hardware` | Retorna CPU, núcleos lógicos, limite de Workers da VPS, tamanho da fila e status de GPU[cite: 16]. |
-| `POST` | `/api/upload-dxf` | Recebe o `.DXF` de peças (`multipart/form-data`), costura linhas e retorna os contornos extraídos[cite: 16]. |
-| `POST` | `/api/upload-sheet-dxf` | Recebe o `.DXF` da chapa principal customizada e retorna seu polígono normalizado[cite: 16]. |
-| `POST` | `/api/start-job` | Classifica peças e furos, registra o Job de cálculo e retorna `{ jobId, parts }`[cite: 16]. |
-| `GET` | `/api/stream/:jobId` | Stream **SSE (`text/event-stream`)** emitindo eventos `queued`, `progress` e `done`[cite: 16]. |
-| `GET` | `/api/sample-dxf` | Gera arquivos `.DXF` de exemplo (`?preset=icamento`, `trueshape`, `industrial`, `sheet_stepped`)[cite: 16]. |
+As instâncias ESICUP do benchmark são baixadas pelo script e não fazem parte do repositório.

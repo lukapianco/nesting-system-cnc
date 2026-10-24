@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Baixa as instâncias públicas de nesting (ESICUP, convertidas para JSON) e as melhores soluções publicadas.
-# Licença MPL-2.0: os arquivos NÃO são redistribuídos com o Prumo; ficam em bench/public/instances (ignorado no git).
+# Repositório sob licença MIT (o jagua-rs é MPL-2.0); os arquivos de dados NÃO são redistribuídos com o Prumo; ficam em bench/public/instances (ignorado no git).
 # Créditos: JeroenGar/jagua-rs e JeroenGar/sparrow — "An open-source heuristic to reboot 2D nesting research"
 # (arXiv:2509.13329). Instâncias originais: ESICUP (EURO Special Interest Group on Cutting and Packing).
 set -euo pipefail

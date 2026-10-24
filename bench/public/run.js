@@ -23,11 +23,12 @@ const { getBoundingBox, computeSignedArea } = require(path.join(ROOT, 'geometry'
 const INSTANCES = ['albano', 'blaz1', 'dagli', 'fu', 'jakobs1', 'jakobs2', 'mao', 'marques', 'shapes0', 'shapes1', 'shirts', 'swim', 'trousers'];
 
 function args() {
-  const a = process.argv.slice(2), o = { merge: false, strict: false, time: 60, seeds: 5, parallel: Math.max(1, os.cpus().length - 1), only: null, out: path.join(__dirname, 'results'), widthFactor: 2.5 };
+  const a = process.argv.slice(2), o = { engine: 'classico', workers: 1, merge: false, strict: false, time: 60, seeds: 5, parallel: Math.max(1, os.cpus().length - 1), only: null, out: path.join(__dirname, 'results'), widthFactor: 2.5 };
   for (let i = 0; i < a.length; i++) {
     const k = a[i].replace(/^--/, ''), v = a[i + 1];
     if (k === 'strict' || k === 'merge') { o[k] = true; }
-    else if (k === 'only') { o.only = v.split(','); i++; } else if (k in o) { o[k] = k === 'out' ? v : Number(v); i++; }
+    else if (k === 'rebuild') { o.merge = true; o.only = []; } // só refaz tabela/CSV a partir do JSON salvo
+    else if (k === 'only') { o.only = v.split(','); i++; } else if (k in o) { o[k] = (k === 'out' || k === 'engine') ? v : Number(v); i++; }
   }
   return o;
 }
@@ -96,6 +97,35 @@ function measure(layout, problem, params) {
   };
 }
 
+/** Motor externo (ADR 006): mesma instância, mesma régua independente. Uma thread por execução, como o clássico. */
+async function runOneSparrow(problem, seed, timeS, workers) {
+  const S = require(path.join(ROOT, 'engine', 'sparrowBridge'));
+  const sc = problem.scale;
+  const types = problem.inst.items.map(it => {
+    const pts = it.shape.data.map(([x, y]) => ({ x: x * sc, y: y * sc }));
+    if (pts.length > 1 && pts[0].x === pts[pts.length - 1].x && pts[0].y === pts[pts.length - 1].y) pts.pop();
+    return { points: pts, demand: it.demand };
+  });
+  const angles = { FIXED_0: [0], GRAIN_X: [0, 180], ORTHOGONAL: [0, 90, 180, 270] }[problem.grain];
+  const { instance, inflate } = S.buildInstance(types, { stripHeight: 1000, gap: 0, allowedAngles: angles, name: problem.name });
+  const t0 = Date.now();
+  const curve = [];
+  const run = S.runSparrow(instance, { timeS, seed, workers, onSolution: b => curve.push({ t: +((Date.now() - t0) / 1000).toFixed(1), len: b.strip_width }) });
+  const { best } = await run.promise;
+  // peças nominais na chapa: faixa começa em (b − g, b − g), com b = 0 no benchmark
+  const placedParts = best.layout.placed_items.map((pi, k) => {
+    const ring = S.transformRing(types[pi.item_id].points, pi.transformation).map(p => ({ x: p.x - inflate, y: p.y - inflate }));
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const q of ring) { minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y); }
+    return { id: `P${k}`, name: `item ${pi.item_id} #${k}`, x: minX, y: minY, angle: pi.transformation.rotation, placedWidth: maxX - minX, placedHeight: maxY - minY,
+      placedPoints: ring.map(q => ({ x: q.x - minX, y: q.y - minY })), placedHoles: [] };
+  });
+  const layout = { placedParts, unplacedParts: [], sheetWidth: Math.ceil(best.strip_width + 10), sheetHeight: 1000, sheetPoly: null };
+  const params = normalizeNestingParams({ ...problem.cfg, sheet_width: layout.sheetWidth });
+  const meas = measure(layout, problem, params);
+  return { seed, evals: null, seconds: +((Date.now() - t0) / 1000).toFixed(1), ...meas, curve, largura_folga: null, tentativa: 1, engine: 'sparrow' };
+}
+
 /** Faixa folgada = fator × (área ÷ altura). Se nem todas as peças couberem (densidade baixa, ex.: shapes0/1), a MESMA
  *  semente roda de novo com a faixa 1,6× maior (até 2 vezes); o fator usado fica registrado em cada resultado. */
 async function runSeed(problem, seed, timeS, widthFactor) {
@@ -112,7 +142,7 @@ async function runSeed(problem, seed, timeS, widthFactor) {
 
 function runOne(problem, seed, timeS, widthFactor) {
   const width = Math.ceil(widthFactor * problem.totalArea / 1000);
-  const config = normalizeNestingParams({ ...problem.cfg, sheet_width: width, total_iterations: 250000, time_limit_s: timeS, seed_offset: seed });
+  const config = normalizeNestingParams({ ...problem.cfg, engine: 'CLASSICO', sheet_width: width, total_iterations: 250000, time_limit_s: timeS, seed_offset: seed });
   config.sheet_width = width; // normalize aplica mínimo de 20; a largura folgada é a do problema
   const parts = expandPartsByQuantities(problem.catalog, problem.quantities);
   return new Promise((resolve, reject) => {
@@ -147,20 +177,21 @@ async function main() {
   const workers = Array.from({ length: Math.min(o.parallel, queue.length) }, async () => {
     while (next < queue.length) {
       const [n, s] = queue[next++];
-      const r = await runSeed(problems[n], s, o.time, o.widthFactor);
+      const r = o.engine === 'sparrow' ? await runOneSparrow(problems[n], s, o.time, o.workers) : await runSeed(problems[n], s, o.time, o.widthFactor);
       (results[n] = results[n] || []).push(r);
-      console.log(`${n.padEnd(9)} semente ${s}: densidade ${r.density.toFixed(2)}% ${r.valid ? 'válida' : 'INVÁLIDA ' + JSON.stringify(r.errors)} (${r.placed}/${r.expected} peças, ${r.evals} avaliações)`);
+      console.log(`${n.padEnd(9)} semente ${s}: densidade ${r.density.toFixed(2)}% ${r.valid ? 'válida' : 'INVÁLIDA ' + JSON.stringify(r.errors)} (${r.placed}/${r.expected} peças${r.evals != null ? `, ${r.evals} avaliações` : ''})`);
     }
   });
   await Promise.all(workers);
 
   const pkg = require(path.join(ROOT, 'package.json'));
-  const stamp = `v${pkg.version}_${o.time}s`;
+  const stamp = `v${pkg.version}_${o.time}s${o.engine === 'sparrow' ? '_sparrow' : ''}`;
   // --merge: refaz só as instâncias pedidas e mantém as outras da última rodada com o mesmo carimbo (versão + tempo)
-  let names = names0;
+  let names = names0, prevMeta = null;
   const prevFile = path.join(o.out, `public_${stamp}.json`);
   if (o.merge && fs.existsSync(prevFile)) {
     const prev = JSON.parse(fs.readFileSync(prevFile, 'utf8'));
+    prevMeta = prev.meta;
     for (const [n, rs] of Object.entries(prev.raw || {})) if (!results[n]) results[n] = rs.map(r => ({ largura_folga: prev.meta.largura_folga, tentativa: 1, ...r }));
     names = INSTANCES.filter(n => results[n]);
     for (const n of names) if (!problems[n]) problems[n] = loadInstance(dir, n);
@@ -178,11 +209,13 @@ async function main() {
       validas: `${rs.length}/${(results[n] || []).length}`,
       media: +mean.toFixed(2), melhor: +Math.max(...ds).toFixed(2), pior: +Math.min(...ds).toFixed(2), desvio: +sd.toFixed(2),
       referencia_sparrow: ref, gap_pp: ref ? +(ref - Math.max(...ds)).toFixed(2) : null,
-      avaliacoes_media: Math.round(rs.reduce((s, r) => s + r.evals, 0) / Math.max(1, rs.length)),
-      largura_folga: [...new Set(rs.map(r => r.largura_folga))].join('/')
+      avaliacoes_media: rs.every(r => r.evals != null) ? Math.round(rs.reduce((s, r) => s + r.evals, 0) / Math.max(1, rs.length)) : null,
+      largura_folga: rs.every(r => r.largura_folga == null) ? null : [...new Set(rs.map(r => r.largura_folga))].join('/')
     };
   });
-  const meta = { versao: pkg.version, data: new Date().toISOString(), tempo_s: o.time, sementes: o.seeds, nucleos_paralelos: o.parallel, cpu: os.cpus()[0] && os.cpus()[0].model, largura_folga: o.widthFactor, refeitas_nesta_rodada: o.merge ? names0 : undefined };
+  const metaNow = { versao: pkg.version, data: new Date().toISOString(), tempo_s: o.time, sementes: o.seeds, nucleos_paralelos: o.parallel, cpu: os.cpus()[0] && os.cpus()[0].model, motor: o.engine, threads_por_execucao: o.engine === 'sparrow' ? o.workers : 1, largura_folga: o.engine === 'sparrow' ? null : o.widthFactor, refeitas_nesta_rodada: o.merge ? names0 : undefined };
+  // numa mescla, a rodada original manda (data, paralelismo, CPU); só a lista de refeitas é desta
+  const meta = prevMeta ? { ...prevMeta, refeitas_nesta_rodada: names0, tabela_refeita_em: metaNow.data } : metaNow;
   fs.writeFileSync(path.join(o.out, `public_${stamp}.json`), JSON.stringify({ meta, rows, raw: results }, null, 1));
   const head = Object.keys(rows.find(r => 'media' in r) || rows[0]);
   fs.writeFileSync(path.join(o.out, `public_${stamp}.csv`), [head.join(';'), ...rows.map(r => head.map(h => String(r[h] ?? '').replace('.', ',')).join(';'))].join('\r\n') + '\r\n');

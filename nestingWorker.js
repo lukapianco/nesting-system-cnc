@@ -11,7 +11,7 @@ const { segmentsIntersectExact, pointToSegmentDistSq, NfpCacheManager } = requir
 const { planCam } = require('./camPlanner');
 const { validateLayout } = require('./validator');
 
-const { parts = [], sheet = null, config: rawConfig = {}, stopFlag = null } = workerData;
+const { parts = [], sheet = null, config: rawConfig = {}, stopFlag = null, hardware = {} } = workerData;
 // "Parar e manter o melhor": o servidor grava 1 neste SharedArrayBuffer; o laço confere a cada avaliação
 // (o laço é síncrono, então mensagens não chegariam até o fim) e encerra finalizando o melhor layout.
 const STOP_VIEW = stopFlag ? new Int32Array(stopFlag) : null;
@@ -1059,6 +1059,14 @@ function decodeCandidateBLF(orderedParts, heuristic, forcedAngles, gravityDir) {
   // Compactação contínua (Jostling) acelerada por R-Tree
   compactLayoutWithRTree(placedParts, sheet, gravityDir);
 
+  return assembleResult(placedParts, nestedInHolesMap, unplacedParts, heuristic, gravityDir);
+}
+
+/**
+ * Monta o resultado a partir das mães já posicionadas: filhas In-Hole (mesma transformação da mãe), métricas e
+ * retalhos. Usado pelo decodificador BLF e pelo otimizador externo (engine/sparrowBridge, ADR 006).
+ */
+function assembleResult(placedParts, nestedInHolesMap, unplacedParts, heuristic, gravityDir) {
   // Filhas In-Hole: transformadas junto com a mãe. Filhas de mães NÃO alocadas vão para as não-alocadas
   // (antes sumiam silenciosamente do layout e da contagem).
   let inHoleCount = 0;
@@ -1228,7 +1236,7 @@ function thinAngleGenes(genes, rng) {
   return out;
 }
 
-function runHybridMetaheuristicLoop() {
+function runHybridMetaheuristicLoop(engineNote = null) {
   const totalIterations = params.total_iterations;
   const startTime = Date.now();
   const rng = createSeededRandom(SHEET_W * 31 + SHEET_H * 17 + params.seed_offset);
@@ -1422,8 +1430,175 @@ function runHybridMetaheuristicLoop() {
     calcPerSec: Math.round(executed / Math.max(0.001, totalTimeMs / 1000)),
     improvements,
     bestResult: bestResult ? slimResult(bestResult) : null,
+    topArchive: finals.map(slimResult),
+    engine: 'CLASSICO',
+    engineNote
+  });
+}
+
+// =========================================================================
+// 8. OTIMIZADOR EXTERNO prumo-sparrow (ADR 006)
+// =========================================================================
+// O sparrow (minimização de sobreposição + compressão da faixa) posiciona as MÃES pelo contorno externo inflado;
+// filhas In-Hole, métricas, retalhos, CAM e validação são os mesmos do motor clássico (assembleResult/finalize).
+// Qualquer coisa fora do que ele resolve (chapa desenhada, lote que não cabe, layout reprovado) volta para o clássico.
+
+const sparrowBridge = require('./engine/sparrowBridge');
+
+function polygonPerimeter(pts) {
+  let s = 0;
+  for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; s += Math.hypot(b.x - a.x, b.y - a.y); }
+  return s;
+}
+
+/** Motivo para NÃO usar o otimizador externo neste job (null = usar). */
+function sparrowNotApplicable() {
+  if (params.engine === 'CLASSICO') return null; // escolha explícita: nada a avisar
+  if (!sparrowBridge.findSparrowBinary()) return 'otimizador externo (prumo-sparrow) não instalado neste servidor';
+  if (sheet?.isCustomDxf) return 'chapa desenhada (contorno irregular ou com furos) ainda usa o motor clássico';
+  if (!parts.length) return 'sem peças';
+  const b = EFFECTIVE_BORDER_MARGIN, g = NOMINAL_PART_GAP / 2 + sparrowBridge.SAFETY;
+  const H = SHEET_H - 2 * b, W = SHEET_W - 2 * b;
+  if (H <= 0 || W <= 0) return 'margem maior que a chapa';
+  // área inflada (contorno + faixa de meia folga) maior que a chapa útil: não cabe tudo numa chapa
+  const need = parts.reduce((s, p) => s + p.area + polygonPerimeter(p.points) * g + Math.PI * g * g, 0);
+  if (need > (W + 2 * g) * (H + 2 * g)) return 'as peças não cabem numa chapa (área); o motor clássico posiciona o máximo possível';
+  return null;
+}
+
+const snapAngle = (a) => {
+  let best = ALLOWED_ROTATIONS[0], d = Infinity;
+  for (const r of ALLOWED_ROTATIONS) {
+    const diff = Math.abs(((((a - r) % 360) + 540) % 360) - 180);
+    if (diff < d) { d = diff; best = r; }
+  }
+  return best;
+};
+
+async function runSparrowEngine() {
+  const startTime = Date.now();
+  const goal = params.optimization_goal;
+  const ordered = [...parts].sort((a, b) => b.area - a.area);
+  const { mainSheetParts, nestedInHolesMap } = executeHoleFilling(ordered, params.hole_filling);
+
+  // um item do otimizador por TIPO de mãe (as cópias viram demanda); contorno no referencial da peça (ângulo 0)
+  const typeOf = new Map(), types = [];
+  for (const p of mainSheetParts) {
+    const key = p.basePartId || p.id;
+    if (!typeOf.has(key)) { typeOf.set(key, types.length); types.push({ points: p.points, demand: 0, instances: [] }); }
+    const t = types[typeOf.get(key)];
+    t.demand++; t.instances.push(p);
+  }
+  const b = EFFECTIVE_BORDER_MARGIN;
+  const { instance, inflate } = sparrowBridge.buildInstance(types, {
+    stripHeight: SHEET_H - 2 * b, gap: NOMINAL_PART_GAP, allowedAngles: ALLOWED_ROTATIONS, name: 'prumo'
+  });
+  const maxStrip = SHEET_W - 2 * b + 2 * inflate + 1e-6;
+  const off = b - inflate;
+
+  const toResult = (sol) => {
+    const used = new Map();
+    const placed = sol.layout.placed_items.map((pi) => {
+      const t = types[pi.item_id];
+      const k = used.get(pi.item_id) || 0; used.set(pi.item_id, k + 1);
+      const part = t.instances[k];
+      const ang = snapAngle(pi.transformation.rotation);
+      const rot = getRotatedPartGeometry(part, ang);
+      const [tx, ty] = pi.transformation.translation;
+      return {
+        ...part,
+        x: +(rot.offX + tx + off).toFixed(3),
+        y: +(rot.offY + ty + off).toFixed(3),
+        angle: ang,
+        placedWidth: rot.w,
+        placedHeight: rot.h,
+        rotated: ang !== 0,
+        nestedInsideHole: false,
+        placedPoints: rot.pts,
+        placedHoles: rotHolesForInstance(rot, part).map(h => ({ ...h, hasChildPartInside: nestedInHolesMap.has(h.id) }))
+      };
+    });
+    const res = assembleResult(placed, nestedInHolesMap, [], 'SPARROW', 'TOP_LEFT');
+    res.engine = 'SPARROW';
+    res.sparrowStripWidth = sol.strip_width;
+    return res;
+  };
+
+  const expectedIds = parts.map(p => p.id);
+  const finalize = (res) => {
+    upgradeToFull(res);
+    planCam(res, params);
+    res.validation = validateLayout(res, params, { expectedIds, allowedRotations: ALLOWED_ROTATIONS });
+    return res;
+  };
+
+  const timeS = params.time_limit_s > 0 ? params.time_limit_s : params.external_time_s;
+  const workers = Math.max(1, Math.floor((hardware.totalCores || 2) / Math.max(1, hardware.maxWorkers || 1)));
+  const fitting = []; // soluções que cabem na chapa, na ordem em que chegaram (cada uma melhor que a anterior)
+  let improvements = 0, lastSent = 0, stoppedByUser = false;
+  const run = sparrowBridge.runSparrow(instance, {
+    timeS, seed: params.seed_offset, workers,
+    onSolution: (sol) => {
+      if (sol.strip_width > maxStrip) return;
+      if (fitting.length && sol.strip_width >= fitting[fitting.length - 1].strip_width) return;
+      fitting.push(sol);
+      improvements++;
+      const now = Date.now();
+      if (now - lastSent < 400) return;
+      lastSent = now;
+      const res = toResult(sol);
+      upgradeToFull(res);
+      planCam(res, params);
+      parentPort.postMessage({
+        type: 'progress', engine: 'SPARROW', iter: improvements, totalIterations: improvements,
+        fraction: Math.min(1, (now - startTime) / (timeS * 1000)), calcPerSec: 0, improvements, isNewRecord: true,
+        bestResult: slimResult(res)
+      });
+    }
+  });
+  const poll = setInterval(() => {
+    if (stopRequested() && !stoppedByUser) { stoppedByUser = true; run.stop(); }
+    parentPort.postMessage({ type: 'progress', engine: 'SPARROW', iter: improvements, totalIterations: Math.max(1, improvements), fraction: Math.min(1, (Date.now() - startTime) / (timeS * 1000)), calcPerSec: 0, improvements, isNewRecord: false });
+  }, 250);
+  let failure = null;
+  try { await run.promise; } catch (e) { failure = e.message; }
+  clearInterval(poll);
+
+  // as últimas soluções (as melhores) viram o arquivo de alternativas; só entram as aprovadas pelo validador
+  const finals = [];
+  for (const sol of fitting.slice(-6).reverse()) {
+    const res = finalize(toResult(sol));
+    if (res.validation.ok) finals.push(res);
+  }
+  finals.sort((a, c) => compareSolutions(c, a, goal));
+
+  if (!finals.length) {
+    const why = failure ? `otimizador externo falhou (${failure})`
+      : fitting.length ? 'nenhuma solução do otimizador externo passou no validador'
+        : 'o otimizador externo não conseguiu pôr todas as peças numa chapa';
+    return runHybridMetaheuristicLoop(`${why}; resultado do motor clássico`);
+  }
+  const best = finals[0];
+  const totalTimeMs = Date.now() - startTime;
+  parentPort.postMessage({
+    type: 'done',
+    engine: 'SPARROW',
+    engineNote: null,
+    totalIterations: improvements,
+    plannedIterations: improvements,
+    stoppedByTimeLimit: !stoppedByUser,
+    stoppedByUser,
+    totalTimeMs,
+    calcPerSec: 0,
+    improvements,
+    bestResult: slimResult(best),
     topArchive: finals.map(slimResult)
   });
 }
 
-runHybridMetaheuristicLoop();
+const notApplicable = params.engine === 'CLASSICO' ? 'n/a' : sparrowNotApplicable();
+if (notApplicable === null) {
+  runSparrowEngine().catch(e => parentPort.postMessage({ type: 'error', error: `otimizador externo: ${e.message}` }));
+} else {
+  runHybridMetaheuristicLoop(params.engine === 'CLASSICO' ? null : notApplicable);
+}

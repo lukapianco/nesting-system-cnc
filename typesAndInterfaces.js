@@ -131,7 +131,13 @@ function normalizeNestingParams(rawConfig = {}) {
     lead_in_type: ['ARC', 'LINE_45', 'LINE_90'].includes(rawConfig.lead_in_type) ? rawConfig.lead_in_type : 'ARC',
     total_iterations: Math.max(50, Math.min(250000, Number(rawConfig.total_iterations ?? rawConfig.totalIterations ?? 15000))),
     optimization_goal: rawConfig.optimization_goal || rawConfig.goal || 'MAX_UTILIZATION',
-    seed_offset: Number(rawConfig.seed_offset ?? rawConfig.seedOffset ?? 1)
+    seed_offset: Number(rawConfig.seed_offset ?? rawConfig.seedOffset ?? 1),
+    // motor de posicionamento (ADR 006): AUTO = otimizador externo prumo-sparrow quando instalado e aplicável,
+    // senão o clássico (BRKGA + BLF); CLASSICO e SPARROW forçam (SPARROW cai no clássico se não se aplicar)
+    engine: ['AUTO', 'CLASSICO', 'SPARROW'].includes(String(rawConfig.engine ?? rawConfig.motor ?? 'AUTO').toUpperCase())
+      ? String(rawConfig.engine ?? rawConfig.motor ?? 'AUTO').toUpperCase() : 'AUTO',
+    // tempo do otimizador externo quando não há limite de tempo (o clássico usa o número de avaliações)
+    external_time_s: Math.min(3600, Math.max(2, Number(rawConfig.external_time_s ?? 30)))
   };
 }
 

@@ -20,7 +20,10 @@ function sheetFromPreset(name, tol = 0.03) {
 
 /** @returns {Promise<{done:Object, records:number, job:Object, ms:number}>} */
 /** qty multiplica as cópias encontradas no desenho (x1 = o desenho como está). */
-function runPreset({ parts = 'icamento', dxfText = null, sheet = null, config = {}, qty = 1, importOptions = {} }) {
+// Motor padrão dos testes = CLASSICO (resultados reproduzíveis por semente e avaliações). O otimizador externo tem os
+// testes dele (test/engine_sparrow.js), que passam engine explicitamente.
+function runPreset({ parts = 'icamento', dxfText = null, sheet = null, config: cfg = {}, qty = 1, importOptions = {}, stopAfterMs = 0, hardware = {} }) {
+  const config = { engine: 'CLASSICO', ...cfg };
   const parsed = dxfText ? parseText(dxfText) : parsePreset(parts);
   const probe = buildJob({ parsedDxf: parsed, config, quantities: {}, importOptions });
   const quantities = {};
@@ -31,10 +34,13 @@ function runPreset({ parts = 'icamento', dxfText = null, sheet = null, config = 
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
     let records = 0;
+    const stopFlag = new SharedArrayBuffer(4);
     const w = new Worker(path.join(__dirname, '..', 'nestingWorker.js'), {
-      workerData: { parts: job.expandedParts, sheet: job.sheet, config: job.normalizedConfig, hardware: {} }
+      workerData: { parts: job.expandedParts, sheet: job.sheet, config: job.normalizedConfig, hardware, stopFlag }
     });
+    if (stopAfterMs > 0) setTimeout(() => Atomics.store(new Int32Array(stopFlag), 0, 1), stopAfterMs);
     w.on('message', (m) => {
+      if (m.type === 'error') { reject(new Error(m.error)); w.terminate(); return; }
       if (m.type === 'progress' && m.isNewRecord) records++;
       if (m.type === 'done') { resolve({ done: m, records, job, ms: Date.now() - t0 }); w.terminate(); }
     });

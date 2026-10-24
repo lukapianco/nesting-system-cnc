@@ -1,0 +1,24 @@
+[package]
+name = "jagua-rs"
+version = "1.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MPL-2.0"
+repository = "https://github.com/JeroenGar/jagua-rs"
+authors = ["Jeroen Gardeyn"]
+description = "jagua-rs 1.1.0 (MPL-2.0), copia reduzida para o Prumo: sem SVG, sem offset via geo, sem ndarray. Ver PRUMO_MODIFICACOES.md"
+
+[dependencies]
+num-traits = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+ordered-float = "5.0"
+log = "0.4"
+slotmap = "1.0"
+float-cmp = "0.10"
+itertools = "0.15"
+anyhow = "1.0"
+rayon = "1.11"
+
+[features]
+spp = []
+bpp = []
