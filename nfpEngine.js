@@ -1,60 +1,13 @@
 // nfpEngine.js
 'use strict';
 
-const { isPointInPolygon } = require('./cadParser');
-
-// Escala inteira de 64-bits (precisão de nanômetro) para orientação robusta livre de degenerescência IEEE 754
-const INT_SCALE = 1000000;
-
-function toFixedInt(val) {
-  return BigInt(Math.round(val * INT_SCALE));
-}
-
-/**
- * Orientação exata em inteiros de 64-bits (BigInt):
- * > 0: Anti-horário (CCW); < 0: Horário (CW); === 0: Colinear.
- */
-function orient2dExactInt64(ax, ay, bx, by, cx, cy) {
-  const det = (toFixedInt(bx - ax) * toFixedInt(cy - ay)) -
-              (toFixedInt(by - ay) * toFixedInt(cx - ax));
-  return det > 0n ? 1 : (det < 0n ? -1 : 0);
-}
-
-// Limite de erro do determinante 2x2 em double (Shewchuk: (3 + 16ε)ε, ε = 2^-53)
-const ORIENT_ERR_BOUND = 3.3306690738754716e-16;
-
-/**
- * Orientação robusta com FILTRO DE PONTO FLUTUANTE: o sinal do determinante em double é confiável quando
- * |det| excede o limite de erro; só no caso duvidoso (quase colinear) cai no cálculo inteiro exato.
- * Mesma resposta que orient2dExactInt64, sem pagar BigInt em ~100% das chamadas
- * (era 69% do tempo do worker em chapas DXF customizadas).
- */
-function orient2dRobust(ax, ay, bx, by, cx, cy) {
-  const detL = (bx - ax) * (cy - ay);
-  const detR = (by - ay) * (cx - ax);
-  const det = detL - detR;
-  const err = ORIENT_ERR_BOUND * (Math.abs(detL) + Math.abs(detR));
-  if (det > err) return 1;
-  if (-det > err) return -1;
-  return orient2dExactInt64(ax, ay, bx, by, cx, cy);
-}
-
-function segmentsIntersectExact(a1, a2, b1, b2) {
-  const o1 = orient2dRobust(a1.x, a1.y, a2.x, a2.y, b1.x, b1.y);
-  const o2 = orient2dRobust(a1.x, a1.y, a2.x, a2.y, b2.x, b2.y);
-  const o3 = orient2dRobust(b1.x, b1.y, b2.x, b2.y, a1.x, a1.y);
-  const o4 = orient2dRobust(b1.x, b1.y, b2.x, b2.y, a2.x, a2.y);
-  return (o1 !== o2) && (o3 !== o4);
-}
-
-function pointToSegmentDistSq(px, py, x1, y1, x2, y2) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq === 0) return (px - x1) ** 2 + (py - y1) ** 2;
-  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
-  return (px - (x1 + t * dx)) ** 2 + (py - (y1 + t * dy)) ** 2;
-}
+// Predicados robustos vivem no módulo folha geometry/primitives (sem ciclos de require).
+const {
+  orient2dExactInt64,
+  orient2dRobust,
+  segmentsIntersectExact,
+  pointToSegmentDistSq
+} = require('./geometry/primitives');
 
 /**
  * Fecho Convexo (Monotone Chain) em O(V log V) para cálculo rápido de Soma de Minkowski basal.
@@ -181,4 +134,4 @@ module.exports = {
   pointToSegmentDistSq,
   computeConvexHull,
   NfpCacheManager
-};
+};

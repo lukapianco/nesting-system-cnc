@@ -53,7 +53,9 @@ function buildSampleDxf(preset = 'icamento') {
     ];
   }
 
-  return `0\nSECTION\n2\nENTITIES\n${entities.join('\n')}\n0\nENDSEC\n0\nEOF`;
+  // Cabeçalho com $INSUNITS = 4 (mm): o leitor não precisa assumir a unidade.
+  const header = '0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n9\n$MEASUREMENT\n70\n1\n0\nENDSEC\n';
+  return `${header}0\nSECTION\n2\nENTITIES\n${entities.join('\n')}\n0\nENDSEC\n0\nEOF`;
 }
 
 module.exports = { buildSampleDxf };

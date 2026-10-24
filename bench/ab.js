@@ -40,9 +40,11 @@ async function runCase(label, c) {
         const sheet = c.sheetDxf ? C.buildCustomSheetFromContours(C.extractContoursFromDxf(new DxfParser().parseSync(c.sheetDxf), 0.03)) : null;
         r = await runWorker(`${V5}/nestingWorker.js`, { parts, sheet, config: norm, hardware: {} });
       } else {
-        const sheetObj = c.sheetDxf ? require('../cadParser').buildCustomSheetFromContours(require('../cadParser').extractContoursFromDxf(new DxfParser().parseSync(c.sheetDxf), 0.03)) : null;
-        const probe = mine.buildJob({ parsedDxf: parsedParts, config: cfg, quantities: {} }); const q = {}; probe.catalogParts.forEach(p => { q[p.id] = c.qty || 1; });
-        const job = mine.buildJob({ parsedDxf: parsedParts, sheet: sheetObj, config: cfg, quantities: q });
+        const sheetObj = c.sheetDxf ? require('../cadParser').buildCustomSheetFromContours(require('../cadParser').extractContoursFromDxf(require('../cadParser').parseDxf(c.sheetDxf), 0.03, { frameMode: 'part' })) : null;
+        // V5.3+: leitor próprio; cópias idênticas viram quantidade, então multiplica pela contagem detectada
+        const myParsed = require('../cadParser').parseDxf(c.dxf || buildSampleDxf(c.parts));
+        const probe = mine.buildJob({ parsedDxf: myParsed, config: cfg, quantities: {} }); const q = {}; probe.catalogParts.forEach(p => { q[p.id] = (c.qty || 1) * (p.quantity_detected || 1); });
+        const job = mine.buildJob({ parsedDxf: myParsed, sheet: sheetObj, config: cfg, quantities: q });
         r = await runWorker(path.join(__dirname, '..', 'nestingWorker.js'), { parts: job.expandedParts, sheet: job.sheet, config: job.normalizedConfig, hardware: {} });
       }
       layoutOf = r.done.bestResult; reported = layoutOf.compactUtilization;

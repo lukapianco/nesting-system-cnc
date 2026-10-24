@@ -1,7 +1,7 @@
 // camPlanner.js
 'use strict';
 
-const { isPointInPolygon } = require('./cadParser');
+const { isPointInPolygon } = require('./geometry/primitives');
 
 /**
  * Planejamento CAM de um layout já posicionado.

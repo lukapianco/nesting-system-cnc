@@ -706,3 +706,70 @@ body {
   margin-top: 6px;
   font-weight: 600;
 }
+
+/* DIAGNÓSTICO DO DXF (DXF Doctor) */
+.dxf-report {
+  margin-top: 10px;
+  border: 2px solid var(--border);
+  background: #f8fafc;
+  padding: 9px 10px;
+  font-size: 0.76rem;
+}
+.dxf-report-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.dxf-status {
+  font-size: 0.68rem;
+  font-weight: 900;
+  padding: 2px 6px;
+  border: 1.5px solid var(--border);
+  text-transform: uppercase;
+}
+.dxf-status.ok { background: #bbf7d0; }
+.dxf-status.warn { background: #fde68a; }
+.dxf-status.err { background: #fecaca; }
+.dxf-report-file {
+  color: #334155;
+  font-weight: 600;
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+.dxf-frame-banner {
+  border: 2px solid var(--border);
+  background: #ede9fe;
+  padding: 7px 8px;
+  margin-bottom: 7px;
+  font-weight: 700;
+}
+.dxf-frame-banner .btn { margin-top: 6px; margin-right: 6px; }
+.dxf-items {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 230px;
+  overflow-y: auto;
+}
+.dxf-items li {
+  border-left: 5px solid #94a3b8;
+  background: #fff;
+  padding: 4px 6px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.dxf-items li.sev-erro { border-left-color: #b91c1c; background: #fef2f2; }
+.dxf-items li.sev-alto { border-left-color: #ea580c; background: #fff7ed; }
+.dxf-items li.sev-medio { border-left-color: #ca8a04; }
+.dxf-items li.sev-baixo { border-left-color: #64748b; }
+.dxf-items li.sev-info { border-left-color: #0284c7; }
+.dxf-items .where { display: block; font-size: 0.68rem; color: var(--muted); font-weight: 600; }
+.dxf-options { margin-top: 8px; }
+.dxf-options summary { cursor: pointer; font-weight: 800; }
+.dxf-layers { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }
+.dxf-layers .checkbox-row { margin-bottom: 0; font-size: 0.74rem; }
+.dxf-layers small { color: var(--muted); font-weight: 600; }
+.qty-item-detected { font-size: 0.66rem; color: var(--muted); font-weight: 700; }

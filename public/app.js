@@ -11,6 +11,11 @@ let customSheetDxf = null;
 let bestSolutionGlobal = null;
 let activeEventSource = null;
 let seedCounter = 1;
+let currentJobId = null;
+let lastDxfReport = null;
+let excludedLayers = new Set();      // layers que o usuário desmarcou no diagnóstico
+let onlyFrames = null;               // ids de moldura escolhidos (null = todas)
+let sheetBeforeFrame = null;         // medidas da chapa antes de aplicar a moldura (para desfazer)
 
 // Estado de Viewport (Zoom & Pan)
 let viewZoom = 1;
@@ -54,6 +59,22 @@ const processSelect = document.getElementById('processSelect');
 const thicknessInput = document.getElementById('thicknessInput');
 const btnApplyProfile = document.getElementById('btnApplyProfile');
 const profileNotes = document.getElementById('profileNotes');
+
+// Diagnóstico do DXF (DXF Doctor)
+const dxfReportBox = document.getElementById('dxfReport');
+const dxfReportStatus = document.getElementById('dxfReportStatus');
+const dxfReportFile = document.getElementById('dxfReportFile');
+const dxfFrameBanner = document.getElementById('dxfFrameBanner');
+const dxfReportItems = document.getElementById('dxfReportItems');
+const dxfLayerList = document.getElementById('dxfLayerList');
+const dxfUnitsSelect = document.getElementById('dxfUnitsSelect');
+const dxfFrameModeSelect = document.getElementById('dxfFrameModeSelect');
+const dxfJoinTolInput = document.getElementById('dxfJoinTolInput');
+const dxfMaxGapInput = document.getElementById('dxfMaxGapInput');
+const dxfGroupIdentical = document.getElementById('dxfGroupIdentical');
+const dxfIncludeDashed = document.getElementById('dxfIncludeDashed');
+const dxfIncludeHidden = document.getElementById('dxfIncludeHidden');
+const btnStopKeepBest = document.getElementById('btnStopKeepBest');
 
 // Regra do produto: qualidade > velocidade. O modo define o ORÇAMENTO de busca, nunca a correção do resultado.
 const QUALITY_MODES = {
@@ -104,8 +125,9 @@ async function refreshHardwareStatus() {
 // =========================================================
 
 function initDefaultQuantities(partsList) {
+  // Cópias idênticas encontradas no desenho já chegam como quantidade (o usuário pode mudar)
   partQuantities = {};
-  partsList.forEach(p => { partQuantities[p.id] = 1; });
+  partsList.forEach(p => { partQuantities[p.id] = p.quantity_detected || 1; });
   syncQuantityViews();
 }
 
@@ -131,6 +153,7 @@ function syncQuantityViews() {
       <div class="qty-item-info">
         <span class="qty-item-name">${esc(part.name)}</span>
         <span class="qty-item-dim">${Math.round(part.width)}x${Math.round(part.height)}mm</span>
+        ${part.quantity_detected > 1 ? `<span class="qty-item-detected">${part.quantity_detected} no desenho</span>` : ''}
       </div>
       <div class="qty-stepper">
         <button type="button" class="qty-btn" data-act="dec" data-id="${part.id}">−</button>
@@ -192,19 +215,187 @@ function scheduleOptimization(delay = 400) {
 // 2. INGESTÃO .DXF DE PEÇAS E CHAPAS IRREGULARES
 // =========================================================
 
-/** Envia o DXF das peças; o servidor guarda o parse (uploadId) e a tolerância de flecha é aplicada a cada job. */
+/** Opções de importação escolhidas na tela (enviadas no upload, na reanálise e em cada job). */
+function currentImportOptions() {
+  return {
+    units: dxfUnitsSelect.value,
+    frameMode: dxfFrameModeSelect.value,
+    joinTol: Number(dxfJoinTolInput.value) || 0.25,
+    maxGapHeal: Math.max(0, Number(dxfMaxGapInput.value) || 0),
+    groupIdentical: dxfGroupIdentical.checked,
+    includeDashed: dxfIncludeDashed.checked,
+    includeHiddenLayers: dxfIncludeHidden.checked,
+    excludeLayers: [...excludedLayers],
+    onlyFrames
+  };
+}
+
+/** Envia o DXF das peças; o servidor guarda o arquivo lido (uploadId) e devolve catálogo + diagnóstico. */
 async function uploadPartsFile(file) {
+  excludedLayers = new Set();
+  onlyFrames = null;
   const fd = new FormData();
   fd.append('dxfFile', file);
+  fd.append('importOptions', JSON.stringify(currentImportOptions()));
   const res = await fetch(`/api/upload-dxf?tol=${encodeURIComponent(chordalToleranceInput.value || 0.03)}`, { method: 'POST', body: fd });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Falha no upload (HTTP ${res.status})`);
+  if (!res.ok) {
+    renderDxfError(file.name, data.error || `Falha no upload (HTTP ${res.status})`);
+    throw new Error(data.error || `Falha no upload (HTTP ${res.status})`);
+  }
   currentUploadId = data.uploadId || null;
+  applyCatalogResponse(data, true);
+}
+
+/** Reanalisa o mesmo upload com outras opções (layers, unidade, moldura, costura) sem reenviar o arquivo. */
+let reanalyzeTimer = null;
+function scheduleReanalyze() {
+  clearTimeout(reanalyzeTimer);
+  reanalyzeTimer = setTimeout(reanalyzeDxf, 350);
+}
+async function reanalyzeDxf() {
+  if (!currentUploadId) return;
+  dxfReportStatus.textContent = 'reanalisando…';
+  dxfReportStatus.className = 'dxf-status warn';
+  try {
+    const res = await fetch('/api/reanalyze-dxf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uploadId: currentUploadId, importOptions: currentImportOptions(), tol: Number(chordalToleranceInput.value) || 0.03 })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    applyCatalogResponse(data, false);
+    startBackendSseOptimization();
+  } catch (err) {
+    renderDxfError('', err.message);
+  }
+}
+
+function applyCatalogResponse(data, isNewFile) {
   catalogParts = data.catalogParts || [];
+  lastDxfReport = data.report || null;
   initDefaultQuantities(catalogParts);
   renderSeparatedParts(catalogParts);
-  if (data.warnings && data.warnings.length) showCamMessage(data.warnings.join(' | '));
+  renderDxfReport(data, isNewFile);
+  const big = catalogParts.reduce((m, p) => Math.max(m, Math.min(p.width, p.height)), 0);
+  const sheetMin = Math.min(Number(sheetWidthInput.value) || 0, Number(sheetHeightInput.value) || 0);
+  if (!customSheetDxf && big > sheetMin && sheetMin > 0) {
+    const li = document.createElement('li');
+    li.className = 'sev-alto';
+    li.innerHTML = `<strong>ALERTA</strong> — A menor dimensão da maior peça (${big.toFixed(0)} mm) passa da chapa ` +
+      `(${esc(sheetWidthInput.value)} × ${esc(sheetHeightInput.value)} mm): ela não vai caber. Ajuste a chapa.`;
+    dxfReportItems.prepend(li);
+  }
 }
+
+const SEVERITY_LABEL = { erro: 'ERRO', alto: 'ALERTA', medio: 'AVISO', baixo: 'NOTA', info: 'INFO' };
+
+function renderDxfError(fileName, message) {
+  dxfReportBox.classList.remove('hidden');
+  dxfReportStatus.textContent = 'não lido';
+  dxfReportStatus.className = 'dxf-status err';
+  dxfReportFile.textContent = fileName || '';
+  dxfFrameBanner.classList.add('hidden');
+  dxfReportItems.innerHTML = `<li class="sev-erro"><strong>ERRO</strong> — ${esc(message)}</li>`;
+  dxfLayerList.innerHTML = '';
+}
+
+function renderDxfReport(data, isNewFile) {
+  const r = data.report;
+  if (!r) { dxfReportBox.classList.add('hidden'); return; }
+  dxfReportBox.classList.remove('hidden');
+  const worst = r.items.reduce((w, i) => Math.min(w, ['erro', 'alto', 'medio', 'baixo', 'info'].indexOf(i.severity)), 9);
+  dxfReportStatus.textContent = worst === 0 ? 'com erro' : worst === 1 ? 'conferir alertas' : 'lido';
+  dxfReportStatus.className = `dxf-status ${worst === 0 ? 'err' : worst === 1 ? 'warn' : 'ok'}`;
+
+  const sm = r.summary || {};
+  const ents = Object.entries(sm.entities || {}).map(([k, v]) => `${v} ${k}`).join(', ');
+  dxfReportFile.innerHTML = `${esc(data.fileName || '')} · DXF ${esc(r.file.version)} · unidade: ${esc(r.file.units)}<br>` +
+    `${esc(ents || 'nenhuma entidade')}${sm.inserts ? ` · ${sm.inserts} inserção(ões) de bloco (até ${sm.blockDepth} níveis)` : ''}<br>` +
+    `<strong>${sm.closedContours || 0}</strong> contornos fechados → <strong>${sm.catalogParts ?? catalogParts.length}</strong> peça(s) diferente(s), ` +
+    `<strong>${sm.partInstances ?? catalogParts.length}</strong> no desenho`;
+
+  // Moldura(s) detectada(s): chapa sugerida + filtro por moldura
+  const frames = data.frames || r.frames || [];
+  if (frames.length) {
+    const f = frames[0];
+    if (isNewFile && !customSheetDxf && data.suggestedSheet) {
+      sheetBeforeFrame = { w: sheetWidthInput.value, h: sheetHeightInput.value };
+      sheetWidthInput.value = Math.round(data.suggestedSheet.width);
+      sheetHeightInput.value = Math.round(data.suggestedSheet.height);
+      resetZoom();
+    }
+    const label = (fr) => fr.labels && fr.labels.length ? ` — "${esc(fr.labels.join(' / ').replace(/\n/g, ' '))}"` : '';
+    let html = `Moldura ${Math.round(f.width)} × ${Math.round(f.height)} mm detectada${label(f)}: ela é o contorno da chapa, não uma peça.`;
+    if (sheetBeforeFrame) html += ` Chapa ajustada para ${Math.round(f.width)} × ${Math.round(f.height)} mm.`;
+    html += '<br>';
+    if (sheetBeforeFrame) html += `<button type="button" class="btn btn-outline btn-sm" data-frame-act="undo">Voltar para ${esc(sheetBeforeFrame.w)} × ${esc(sheetBeforeFrame.h)}</button>`;
+    else html += `<button type="button" class="btn btn-outline btn-sm" data-frame-act="use">Usar moldura como chapa</button>`;
+    html += `<button type="button" class="btn btn-outline btn-sm" data-frame-act="part">Tratar como peça</button>`;
+    if (frames.length > 1) {
+      html += `<div style="margin-top:6px;">${frames.length} molduras (chapas) no arquivo — peças de:</div>`;
+      html += `<label class="checkbox-row"><input type="radio" name="frameFilter" value="" ${!onlyFrames ? 'checked' : ''}/> todas</label>`;
+      frames.forEach(fr => {
+        html += `<label class="checkbox-row"><input type="radio" name="frameFilter" value="${esc(fr.id)}" ${onlyFrames && onlyFrames[0] === fr.id ? 'checked' : ''}/> ` +
+          `${Math.round(fr.width)} × ${Math.round(fr.height)} (${fr.partContours} contornos)${label(fr)}</label>`;
+      });
+    }
+    dxfFrameBanner.innerHTML = html;
+    dxfFrameBanner.classList.remove('hidden');
+  } else {
+    dxfFrameBanner.classList.add('hidden');
+    dxfFrameBanner.innerHTML = '';
+  }
+
+  dxfReportItems.innerHTML = r.items.filter(i => i.code !== 'FRAME').map(i => {
+    const where = Array.isArray(i.where) && i.where.length
+      ? `<span class="where">em: ${i.where.slice(0, 6).map(w => `(${w.x}, ${w.y})${w.gap !== undefined ? ` abertura ${w.gap} mm` : ''}${w.length !== undefined ? ` ${w.length} mm` : ''}`).join(' · ')}${i.where.length > 6 ? ' …' : ''}</span>` : '';
+    return `<li class="sev-${esc(i.severity)}"><strong>${SEVERITY_LABEL[i.severity] || ''}</strong> — ${esc(i.message)}${where}</li>`;
+  }).join('') || '<li class="sev-info">Nenhum problema encontrado.</li>';
+
+  // Layers: marcar/desmarcar entra na reanálise
+  dxfLayerList.innerHTML = (r.layers || []).length ? '<strong>Layers</strong>' + r.layers.map(L => {
+    const auto = L.excludedBecause.filter(x => x !== 'excluída pelo usuário');
+    const checked = !excludedLayers.has(L.name) && (L.included > 0 || !auto.length);
+    return `<label class="checkbox-row"><input type="checkbox" data-layer="${esc(L.name)}" ${checked ? 'checked' : ''} ${auto.length && !L.included ? 'disabled' : ''}/>` +
+      `<span>${esc(L.name)} <small>${L.included}/${L.paths} entidades${auto.length ? ' · ' + esc(auto.join(', ')) : ''}</small></span></label>`;
+  }).join('') : '';
+}
+
+dxfFrameBanner.addEventListener('click', (e) => {
+  const act = e.target && e.target.dataset ? e.target.dataset.frameAct : null;
+  if (!act) return;
+  const frames = (lastDxfReport && lastDxfReport.frames) || [];
+  if (act === 'undo' && sheetBeforeFrame) {
+    sheetWidthInput.value = sheetBeforeFrame.w; sheetHeightInput.value = sheetBeforeFrame.h; sheetBeforeFrame = null;
+  } else if (act === 'use' && frames[0]) {
+    sheetBeforeFrame = { w: sheetWidthInput.value, h: sheetHeightInput.value };
+    sheetWidthInput.value = Math.round(frames[0].width); sheetHeightInput.value = Math.round(frames[0].height);
+  } else if (act === 'part') {
+    dxfFrameModeSelect.value = 'part';
+    if (sheetBeforeFrame) { sheetWidthInput.value = sheetBeforeFrame.w; sheetHeightInput.value = sheetBeforeFrame.h; sheetBeforeFrame = null; }
+    reanalyzeDxf();
+    return;
+  }
+  resetZoom();
+  if (lastDxfReport) renderDxfReport({ report: lastDxfReport, frames, fileName: dxfReportFile.textContent.split(' · ')[0] }, false);
+  startBackendSseOptimization();
+});
+dxfFrameBanner.addEventListener('change', (e) => {
+  if (e.target && e.target.name === 'frameFilter') {
+    onlyFrames = e.target.value ? [e.target.value] : null;
+    scheduleReanalyze();
+  }
+});
+dxfLayerList.addEventListener('change', (e) => {
+  const name = e.target && e.target.dataset ? e.target.dataset.layer : null;
+  if (name === undefined || name === null) return;
+  if (e.target.checked) excludedLayers.delete(name); else excludedLayers.add(name);
+  scheduleReanalyze();
+});
+[dxfUnitsSelect, dxfFrameModeSelect, dxfJoinTolInput, dxfMaxGapInput, dxfGroupIdentical, dxfIncludeDashed, dxfIncludeHidden]
+  .forEach(el => el.addEventListener('change', scheduleReanalyze));
 
 dxfInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
@@ -212,6 +403,7 @@ dxfInput.addEventListener('change', async (e) => {
   fileNameLabel.textContent = file.name;
   try {
     await uploadPartsFile(file);
+    resetZoom();
     startBackendSseOptimization();
   } catch (err) {
     showCamMessage(`Erro ao ler o DXF das peças: ${err.message}`);
@@ -224,7 +416,8 @@ sheetDxfInput.addEventListener('change', async (e) => {
   const fd = new FormData();
   fd.append('sheetDxfFile', file);
   const res = await fetch('/api/upload-sheet-dxf', { method: 'POST', body: fd });
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { showCamMessage(`Erro ao ler o DXF da chapa: ${data.error || `HTTP ${res.status}`}`); return; }
   if (data.sheet) {
     customSheetDxf = data.sheet;
     const obsCount = (customSheetDxf.obstacles || []).length;
@@ -379,7 +572,7 @@ async function startBackendSseOptimization() {
     const initRes = await fetch('/api/start-job', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uploadId: currentUploadId, sheet: customSheetDxf, config, quantities: partQuantities })
+      body: JSON.stringify({ uploadId: currentUploadId, sheet: customSheetDxf, config, quantities: partQuantities, importOptions: currentImportOptions() })
     });
     init = await initRes.json().catch(() => ({}));
     if (!initRes.ok) throw new Error(init.error || `HTTP ${initRes.status}`);
@@ -397,6 +590,10 @@ async function startBackendSseOptimization() {
     catalogParts = updatedCatalog;
     renderSeparatedParts(catalogParts);
   }
+  currentJobId = jobId;
+  btnStopKeepBest.disabled = false;
+  btnStopKeepBest.textContent = 'Parar e manter o melhor';
+  btnStopKeepBest.classList.remove('hidden');
 
   const es = new EventSource(`/api/stream/${jobId}`);
   activeEventSource = es;
@@ -413,6 +610,7 @@ async function startBackendSseOptimization() {
     if (msg.type === 'error') {
       es.close();
       activeEventSource = null;
+      btnStopKeepBest.classList.add('hidden');
       btnRecalculate.disabled = false;
       progressStatusText.textContent = `Erro no motor: ${msg.error || 'falha desconhecida'}`;
       return;
@@ -436,6 +634,7 @@ async function startBackendSseOptimization() {
     if (msg.type === 'done') {
       es.close();
       activeEventSource = null;
+      btnStopKeepBest.classList.add('hidden');
       btnRecalculate.disabled = false;
       refreshHardwareStatus();
 
@@ -443,7 +642,7 @@ async function startBackendSseOptimization() {
       currentArchive = msg.topArchive || [];
       progressBarFill.style.width = '100%';
       progressPercentText.textContent = '100%';
-      progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Avaliações ${msg.stoppedByTimeLimit ? '(limite de tempo atingido)' : 'Concluídas'} em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
+      progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Avaliações ${msg.stoppedByUser ? '(parado pelo usuário — melhor layout mantido)' : msg.stoppedByTimeLimit ? '(limite de tempo atingido)' : 'Concluídas'} em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
       progressStrategyText.textContent = `Velocidade Média: ${msg.calcPerSec.toLocaleString()} layouts/seg`;
       if (!bestSolutionGlobal) { progressBestText.textContent = 'Nenhum layout gerado.'; return; }
       progressBestText.textContent = `Campeão Travado: ${bestSolutionGlobal.compactUtilization}%`;
@@ -459,9 +658,19 @@ async function startBackendSseOptimization() {
     if (myRun !== runToken) return;
     es.close();
     activeEventSource = null;
+    btnStopKeepBest.classList.add('hidden');
     btnRecalculate.disabled = false;
   };
 }
+
+btnStopKeepBest.addEventListener('click', async () => {
+  if (!currentJobId) return;
+  btnStopKeepBest.disabled = true;
+  btnStopKeepBest.textContent = 'Parando (termina a avaliação atual)…';
+  try {
+    await fetch(`/api/stop/${encodeURIComponent(currentJobId)}`, { method: 'POST' });
+  } catch (_) { /* o stream informa o fim */ }
+});
 
 // =========================================================
 // 4. VIEWPORT CAD/CAM: RENDERIZAÇÃO DE PEÇAS, LEAD-IN E TRAJETÓRIA INSIDE-OUT
@@ -842,6 +1051,9 @@ function renderSeparatedParts(parts) {
         <div class="part-preview"><canvas width="180" height="110" id="prev_${part.id}"></canvas></div>
         <div class="part-meta">
           <div><strong>Envelope AABB:</strong> ${part.width} x ${part.height} mm</div>
+          ${part.quantity_detected > 1 ? `<div><strong>No desenho:</strong> ${part.quantity_detected} cópias${part.instances ? ` (giros: ${[...new Set(part.instances.map(i => i.rotationDeg))].slice(0, 6).join('°, ')}°)` : ''}</div>` : ''}
+          ${part.blockName ? `<div><strong>Bloco:</strong> ${esc(part.blockName)}</div>` : ''}
+          ${part.mirrorOf ? `<div><strong>Espelho de:</strong> ${esc((catalogParts.find(q => q.id === part.mirrorOf) || {}).name || part.mirrorOf)}</div>` : ''}
           <div><strong>Área Shoelace:</strong> ${(part.area / 100).toFixed(2)} cm² (R_max=${rMaxOuter}mm)</div>
           ${holesHtml ? `<div class="hole-tag-list">${holesHtml}</div>` : ''}
         </div>

@@ -4,12 +4,18 @@
 const { parentPort, workerData } = require('worker_threads');
 const { normalizeNestingParams, resolveAllowedRotations, resolveRelativeRotations } = require('./typesAndInterfaces');
 const { RTree2D } = require('./spatialIndex');
-const { isPointInPolygon, computeMaxInscribedCircle, getBoundingBox } = require('./cadParser');
+const { isPointInPolygon, getBoundingBox } = require('./geometry/primitives');
+const { polygonsCollideTrueShape } = require('./engine/collision');
+const { computeMaxInscribedCircle } = require('./cadParser');
 const { segmentsIntersectExact, pointToSegmentDistSq, NfpCacheManager } = require('./nfpEngine');
 const { planCam } = require('./camPlanner');
 const { validateLayout } = require('./validator');
 
-const { parts = [], sheet = null, config: rawConfig = {} } = workerData;
+const { parts = [], sheet = null, config: rawConfig = {}, stopFlag = null } = workerData;
+// "Parar e manter o melhor": o servidor grava 1 neste SharedArrayBuffer; o laço confere a cada avaliação
+// (o laço é síncrono, então mensagens não chegariam até o fim) e encerra finalizando o melhor layout.
+const STOP_VIEW = stopFlag ? new Int32Array(stopFlag) : null;
+const stopRequested = () => !!STOP_VIEW && Atomics.load(STOP_VIEW, 0) === 1;
 const params = normalizeNestingParams(rawConfig);
 const nfpCache = new NfpCacheManager();
 
@@ -201,56 +207,6 @@ function isPartInsideSheetIfp(x, y, w, h, partPts, customSheet, sheetMargin, ker
   }
 
   return true;
-}
-
-/**
- * Detecção de colisão True-Shape exata entre duas peças (usada em conjunto com R-Tree broad-phase).
- */
-function polygonsCollideTrueShape(pA, pB, requiredNominalGap) {
-  if (
-    pA.x + pA.placedWidth + requiredNominalGap <= pB.x + 0.01 ||
-    pB.x + pB.placedWidth + requiredNominalGap <= pA.x + 0.01 ||
-    pA.y + pA.placedHeight + requiredNominalGap <= pB.y + 0.01 ||
-    pB.y + pB.placedHeight + requiredNominalGap <= pA.y + 0.01
-  ) {
-    return false;
-  }
-
-  const isRectA = pA.points.length === 4 && Math.abs(pA.area - pA.bboxArea) < 2 && (pA.angle || 0) % 90 === 0;
-  const isRectB = pB.points.length === 4 && Math.abs(pB.area - pB.bboxArea) < 2 && (pB.angle || 0) % 90 === 0;
-  if (isRectA && isRectB) return true;
-
-  const ptsA = pA.placedPoints.map(p => ({ x: pA.x + p.x, y: pA.y + p.y }));
-  const ptsB = pB.placedPoints.map(p => ({ x: pB.x + p.x, y: pB.y + p.y }));
-
-  for (let i = 0; i < ptsA.length; i++) {
-    const a1 = ptsA[i];
-    const a2 = ptsA[(i + 1) % ptsA.length];
-    if (isPointInPolygon(a1, ptsB)) return true;
-    if (isPointInPolygon({ x: (a1.x + a2.x) * 0.5, y: (a1.y + a2.y) * 0.5 }, ptsB)) return true;
-  }
-
-  for (let j = 0; j < ptsB.length; j++) {
-    const b1 = ptsB[j];
-    const b2 = ptsB[(j + 1) % ptsB.length];
-    if (isPointInPolygon(b1, ptsA)) return true;
-    if (isPointInPolygon({ x: (b1.x + b2.x) * 0.5, y: (b1.y + b2.y) * 0.5 }, ptsA)) return true;
-  }
-
-  const minGapSq = Math.max(0.01, requiredNominalGap - 0.01) ** 2;
-  for (let i = 0; i < ptsA.length; i++) {
-    const a1 = ptsA[i];
-    const a2 = ptsA[(i + 1) % ptsA.length];
-    for (let j = 0; j < ptsB.length; j++) {
-      const b1 = ptsB[j];
-      const b2 = ptsB[(j + 1) % ptsB.length];
-      if (segmentsIntersectExact(a1, a2, b1, b2)) return true;
-      if (pointToSegmentDistSq(a1.x, a1.y, b1.x, b1.y, b2.x, b2.y) < minGapSq) return true;
-      if (pointToSegmentDistSq(b1.x, b1.y, a1.x, a1.y, a2.x, a2.y) < minGapSq) return true;
-    }
-  }
-
-  return false;
 }
 
 function getSolidBoxesForPart(placedPart, gap) {
@@ -876,9 +832,22 @@ function extractStandardRemnants(placedParts, customSheet, minRemnantSize, opts 
 // 6. DECODIFICADOR CONSTRUTIVO BLF (COM PART-IN-PART TRUE-SHAPE)
 // =========================================================================
 
+function placementScore(heuristic, pos, px, py, w, h, reqW, reqH) {
+  if (heuristic === 'POCKET_AND_SLOPE') return px * 4 + py * 1.5 - (pos.tag === 'POCKET_TOP_LEFT' ? 5000 : 0);
+  if (heuristic === 'TOP_ROW') return (py + h) * 10 + px;
+  if (heuristic === 'LEFT_COLUMN') return (px + w) * 10 + py;
+  if (heuristic === 'BOTTOM_LEFT') return (SHEET_H - (py + h)) * 8 + px * 2;
+  return Math.min(pos.rw - reqW, pos.rh - reqH) * 5 + (px + py);
+}
+
+/**
+ * Escolhe a posição de menor pontuação que cabe na chapa e não colide.
+ * Equivalente exato à varredura "testa tudo e guarda o menor": os candidatos são pontuados primeiro,
+ * ordenados de forma ESTÁVEL (empates mantêm a ordem original, como o `<` estrito da versão anterior) e o
+ * primeiro válido vence — sem pagar os testes de colisão dos candidatos que não poderiam ganhar.
+ */
 function findBestPlacement(part, tryAngles, candidatePositions, placedParts, placedRTree, heuristic, gravityDir) {
-  let bestCand = null;
-  let bestScore = Infinity;
+  const cands = [];
 
   for (const ang of tryAngles) {
     const rotData = getRotatedPartGeometry(part, ang);
@@ -912,39 +881,24 @@ function findBestPlacement(part, tryAngles, candidatePositions, placedParts, pla
       let py = pos.y;
       if (pos.isAnchor && gravityDir === 'BOTTOM_LEFT' && !pos.tag) py = Math.max(EFFECTIVE_BORDER_MARGIN, pos.y - h);
       if (pos.isAnchor && gravityDir === 'TOP_RIGHT' && !pos.tag) px = Math.max(EFFECTIVE_BORDER_MARGIN, pos.x - w);
-
       if (!pos.isAnchor && (pos.rw < reqW || pos.rh < reqH)) continue;
-
-      if (!isPartInsideSheetIfp(px, py, w, h, rotData.pts, sheet, params.sheet_margin, params.kerf_width)) continue;
-
-      const tempPart = {
-        id: part.id, x: px, y: py, angle: ang, placedWidth: w, placedHeight: h,
-        area: part.area, bboxArea: part.bboxArea, points: part.points, placedPoints: rotData.pts
-      };
-
-      const nearbyPlaced = placedRTree.search({ minX: px, minY: py, maxX: px + w, maxY: py + h });
-      if (nearbyPlaced.some(other => polygonsCollideTrueShape(tempPart, other, NOMINAL_PART_GAP))) continue;
-
-      let score = 0;
-      if (heuristic === 'POCKET_AND_SLOPE') {
-        score = px * 4 + py * 1.5 - (pos.tag === 'POCKET_TOP_LEFT' ? 5000 : 0);
-      } else if (heuristic === 'TOP_ROW') {
-        score = (py + h) * 10 + px;
-      } else if (heuristic === 'LEFT_COLUMN') {
-        score = (px + w) * 10 + py;
-      } else if (heuristic === 'BOTTOM_LEFT') {
-        score = (SHEET_H - (py + h)) * 8 + px * 2;
-      } else {
-        score = Math.min(pos.rw - reqW, pos.rh - reqH) * 5 + (px + py);
-      }
-
-      if (score < bestScore) {
-        bestScore = score;
-        bestCand = { x: px, y: py, w, h, reqW, reqH, ang, rotData };
-      }
+      cands.push({ score: placementScore(heuristic, pos, px, py, w, h, reqW, reqH), px, py, w, h, reqW, reqH, ang, rotData });
     }
   }
-  return bestCand;
+
+  cands.sort((a, b) => a.score - b.score); // Array.prototype.sort é estável (ES2019)
+
+  for (const c of cands) {
+    if (!isPartInsideSheetIfp(c.px, c.py, c.w, c.h, c.rotData.pts, sheet, params.sheet_margin, params.kerf_width)) continue;
+    const tempPart = {
+      id: part.id, x: c.px, y: c.py, angle: c.ang, placedWidth: c.w, placedHeight: c.h,
+      area: part.area, bboxArea: part.bboxArea, points: part.points, placedPoints: c.rotData.pts
+    };
+    const nearbyPlaced = placedRTree.search({ minX: c.px, minY: c.py, maxX: c.px + c.w, maxY: c.py + c.h });
+    if (nearbyPlaced.some(other => polygonsCollideTrueShape(tempPart, other, NOMINAL_PART_GAP))) continue;
+    return { x: c.px, y: c.py, w: c.w, h: c.h, reqW: c.reqW, reqH: c.reqH, ang: c.ang, rotData: c.rotData };
+  }
+  return null;
 }
 
 /**
@@ -1309,6 +1263,7 @@ function runHybridMetaheuristicLoop() {
   let lastProgressSent = Date.now();
   const timeLimitMs = params.time_limit_s > 0 ? params.time_limit_s * 1000 : 0;
   let executed = 0;
+  let stoppedByUser = false;
 
   for (let iter = 1; iter <= totalIterations; iter++) {
     executed = iter;
@@ -1397,7 +1352,9 @@ function runHybridMetaheuristicLoop() {
     }
 
     const now = Date.now();
-    const outOfTime = timeLimitMs > 0 && now - startTime >= timeLimitMs;
+    const userStop = stopRequested();
+    if (userStop) stoppedByUser = true;
+    const outOfTime = (timeLimitMs > 0 && now - startTime >= timeLimitMs) || userStop;
     if (isNewRecord || now - lastProgressSent >= 85 || iter === totalIterations || outOfTime) {
       lastProgressSent = now;
       const elapsedSec = Math.max(0.001, (now - startTime) / 1000);
@@ -1438,7 +1395,8 @@ function runHybridMetaheuristicLoop() {
     type: 'done',
     totalIterations: executed,
     plannedIterations: totalIterations,
-    stoppedByTimeLimit: executed < totalIterations,
+    stoppedByTimeLimit: executed < totalIterations && !stoppedByUser,
+    stoppedByUser,
     totalTimeMs,
     calcPerSec: Math.round(executed / Math.max(0.001, totalTimeMs / 1000)),
     improvements,

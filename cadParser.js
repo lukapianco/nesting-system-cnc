@@ -1,53 +1,25 @@
-// cadParser.js
+// cadParser.js — DXF -> catálogo de peças (contorno externo CCW + furos CW), pronto para o motor.
+//
+// Desde a V5.3 a leitura do DXF é feita pelo "DXF Doctor" (pasta dxf/): leitor próprio, blocos INSERT
+// aninhados, OCS, ELLIPSE, SPLINE, unidades, layers, costura de contornos, molduras e relatório.
+// Este módulo classifica peça/furo, agrupa cópias idênticas em quantidades e prepara a geometria do motor.
 'use strict';
 
-const { RTree2D } = require('./spatialIndex');
 const { resolveAllowedRotations } = require('./typesAndInterfaces');
+const {
+  getBoundingBox,
+  computeSignedArea,
+  isPointInPolygon,
+  pointToSegmentDist
+} = require('./geometry/primitives');
+const { evaluateNurbs } = require('./dxf/curves');
+const { readDxf } = require('./dxf/reader');
+const { analyzeDxf, normalizeImportOptions } = require('./dxf/doctor');
+const { describe, matchParts } = require('./geometry/congruence');
 
 // =========================================================================
-// 1. ÁLGEBRA DE POLÍGONOS, FÓRMULA DE GAUSS (SHOELACE) E NORMALS
+// 1. ORIENTAÇÃO E NORMAIS
 // =========================================================================
-
-function getBoundingBox(pts) {
-  let min_x = Infinity, min_y = Infinity, max_x = -Infinity, max_y = -Infinity;
-  for (let i = 0; i < pts.length; i++) {
-    const p = pts[i];
-    if (p.x < min_x) min_x = p.x;
-    if (p.y < min_y) min_y = p.y;
-    if (p.x > max_x) max_x = p.x;
-    if (p.y > max_y) max_y = p.y;
-  }
-  const width = +(max_x - min_x).toFixed(3);
-  const height = +(max_y - min_y).toFixed(3);
-  return {
-    min_x: +min_x.toFixed(3),
-    min_y: +min_y.toFixed(3),
-    max_x: +max_x.toFixed(3),
-    max_y: +max_y.toFixed(3),
-    minX: +min_x.toFixed(3),
-    minY: +min_y.toFixed(3),
-    maxX: +max_x.toFixed(3),
-    maxY: +max_y.toFixed(3),
-    width,
-    height,
-    area: +(width * height).toFixed(2)
-  };
-}
-
-/**
- * Fórmula de Gauss (Shoelace): Retorna a área algébrica sinalizada As.
- * As > 0 => Anti-Horário (CCW); As < 0 => Horário (CW).
- */
-function computeSignedArea(pts) {
-  let sum = 0;
-  const n = pts.length;
-  for (let i = 0; i < n; i++) {
-    const p1 = pts[i];
-    const p2 = pts[(i + 1) % n];
-    sum += (p1.x * p2.y - p2.x * p1.y);
-  }
-  return sum * 0.5;
-}
 
 /**
  * Impõe orientação canônica: CCW (As > 0) para contornos externos, CW (As < 0) para furos.
@@ -84,7 +56,7 @@ function computeEdgeNormals(pts) {
 }
 
 // =========================================================================
-// 2. DISCRETIZAÇÃO ADAPTATIVA DE ARCOS, BULGES, BÉZIER E NURBS (SPLINE)
+// 2. CURVAS (API mantida por compatibilidade; o pipeline novo usa dxf/curves.js)
 // =========================================================================
 
 /**
@@ -112,418 +84,38 @@ function discretizeArcAdaptive(cx, cy, radius, startAngleRad, endAngleRad, ccw =
 }
 
 /**
- * Converte um segmento com fator bulge b = tan(DeltaTheta / 4) de LWPOLYLINE em arco discretizado.
- */
-function discretizeBulgeSegment(p1, p2, bulge, deltaMax = 0.03) {
-  if (!bulge || Math.abs(bulge) < 1e-6) return [p1, p2];
-
-  const chordDx = p2.x - p1.x;
-  const chordDy = p2.y - p1.y;
-  const chordLen = Math.hypot(chordDx, chordDy);
-  if (chordLen < 1e-6) return [p1];
-
-  const radius = (chordLen * (1 + bulge * bulge)) / (4 * Math.abs(bulge));
-  const sweepAngle = 4 * Math.atan(Math.abs(bulge));
-  const halfChord = chordLen * 0.5;
-  const apothem = Math.sqrt(Math.max(0, radius * radius - halfChord * halfChord));
-
-  const midX = (p1.x + p2.x) * 0.5;
-  const midY = (p1.y + p2.y) * 0.5;
-  const sign = (bulge > 0 ? 1 : -1) * (Math.abs(bulge) <= 1 ? 1 : -1);
-
-  const nx = -chordDy / chordLen;
-  const ny = chordDx / chordLen;
-  const cx = midX + sign * apothem * nx;
-  const cy = midY + sign * apothem * ny;
-
-  const startAng = Math.atan2(p1.y - cy, p1.x - cx);
-  const endAng = startAng + (bulge > 0 ? sweepAngle : -sweepAngle);
-
-  return discretizeArcAdaptive(cx, cy, radius, startAng, endAng, bulge > 0, deltaMax);
-}
-
-/**
- * Subdivisão Recursiva de De Casteljau com Teste de Planicidade (Flatness <= deltaMax).
- */
-function deCasteljauCubicAdaptive(p0, p1, p2, p3, deltaMax = 0.03, depth = 0) {
-  const dx = p3.x - p0.x;
-  const dy = p3.y - p0.y;
-  const len = Math.hypot(dx, dy) || 1e-9;
-
-  const d1 = Math.abs(dx * (p1.y - p0.y) - dy * (p1.x - p0.x)) / len;
-  const d2 = Math.abs(dx * (p2.y - p0.y) - dy * (p2.x - p0.x)) / len;
-
-  if (0.75 * Math.max(d1, d2) <= deltaMax || depth >= 10) {
-    return [p0, p3];
-  }
-
-  const q0 = p0;
-  const q1 = { x: (p0.x + p1.x) * 0.5, y: (p0.y + p1.y) * 0.5 };
-  const m = { x: (p1.x + p2.x) * 0.5, y: (p1.y + p2.y) * 0.5 };
-  const r2 = { x: (p2.x + p3.x) * 0.5, y: (p2.y + p3.y) * 0.5 };
-  const q2 = { x: (q1.x + m.x) * 0.5, y: (q1.y + m.y) * 0.5 };
-  const r1 = { x: (m.x + r2.x) * 0.5, y: (m.y + r2.y) * 0.5 };
-  const q3 = { x: (q2.x + r1.x) * 0.5, y: (q2.y + r1.y) * 0.5 };
-
-  const left = deCasteljauCubicAdaptive(q0, q1, q2, q3, deltaMax, depth + 1);
-  const right = deCasteljauCubicAdaptive(q3, r1, r2, p3, deltaMax, depth + 1);
-  return [...left.slice(0, -1), ...right];
-}
-
-/**
- * Localiza o intervalo de nós k tal que knots[k] <= u < knots[k+1] (n = último índice de controle).
- */
-function findKnotSpan(n, degree, u, knots) {
-  if (u >= knots[n + 1]) return n;
-  if (u <= knots[degree]) return degree;
-  let lo = degree, hi = n + 1, mid = (lo + hi) >> 1;
-  while (u < knots[mid] || u >= knots[mid + 1]) {
-    if (u < knots[mid]) hi = mid; else lo = mid;
-    mid = (lo + hi) >> 1;
-  }
-  return mid;
-}
-
-/**
- * Avaliação de B-Spline / NURBS (entidade SPLINE do DXF) pelo algoritmo de de Boor em coordenadas homogêneas.
- * (A versão anterior dimensionava a base com n+1 funções e errava até ~25 mm nos últimos vãos.)
+ * Avaliação de NURBS (de Boor em coordenadas homogêneas). Mantida para compatibilidade: delega a dxf/curves.
  */
 function evaluateNurbsPoint(u, degree, controlPoints, knots, weights) {
-  const n = controlPoints.length - 1;
-  const p = degree;
-  const k = findKnotSpan(n, p, u, knots);
-  const d = [];
-  for (let j = 0; j <= p; j++) {
-    const idx = k - p + j;
-    const w = (weights && weights[idx] !== undefined) ? weights[idx] : 1.0;
-    d.push({ x: controlPoints[idx].x * w, y: controlPoints[idx].y * w, w });
-  }
-  for (let r = 1; r <= p; r++) {
-    for (let j = p; j >= r; j--) {
-      const i = k - p + j;
-      const denom = knots[i + p - r + 1] - knots[i];
-      const a = denom > 1e-12 ? (u - knots[i]) / denom : 0;
-      d[j] = {
-        x: (1 - a) * d[j - 1].x + a * d[j].x,
-        y: (1 - a) * d[j - 1].y + a * d[j].y,
-        w: (1 - a) * d[j - 1].w + a * d[j].w
-      };
-    }
-  }
-  const wd = d[p].w || 1.0;
-  return { x: +(d[p].x / wd).toFixed(4), y: +(d[p].y / wd).toFixed(4) };
+  const p = evaluateNurbs(u, degree, controlPoints, knots, weights || null);
+  return { x: +p.x.toFixed(4), y: +p.y.toFixed(4) };
+}
+
+// =========================================================================
+// 3. LEITURA DO DXF (DXF Doctor)
+// =========================================================================
+
+/** Lê bytes/texto DXF (leitor próprio, sem dependências). */
+function parseDxf(input) {
+  return readDxf(input);
 }
 
 /**
- * Spline definida apenas por fit points (curva PASSA pelos pontos): Catmull-Rom centrípeta,
- * em vez de tratá-los como pontos de controle (o que deformava a curva).
+ * DXF lido -> contornos fechados (em mm, mundo) com metadados e relatório (`.report`, `.frames`, `.warnings`).
+ * @param {Object} doc  saída de parseDxf/readDxf
+ * @param {number} deltaMax  flecha máxima (mm)
+ * @param {Object} importOptions  ver dxf/doctor.js DEFAULT_IMPORT
  */
-function discretizeFitPointSpline(fit, deltaMax) {
-  if (fit.length < 3) return fit.map(p => ({ x: p.x, y: p.y }));
-  const P = [fit[0], ...fit, fit[fit.length - 1]];
-  const out = [{ x: fit[0].x, y: fit[0].y }];
-  const tj = (ti, a, b) => ti + Math.pow(Math.hypot(b.x - a.x, b.y - a.y), 0.5);
-  for (let i = 1; i < P.length - 2; i++) {
-    const p0 = P[i - 1], p1 = P[i], p2 = P[i + 1], p3 = P[i + 2];
-    const t0 = 0, t1 = tj(t0, p0, p1), t2 = tj(t1, p1, p2), t3 = tj(t2, p2, p3);
-    if (t2 - t1 < 1e-9) continue;
-    const segLen = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    const steps = Math.max(4, Math.min(200, Math.ceil(segLen / Math.max(deltaMax * 40, 0.5))));
-    for (let s = 1; s <= steps; s++) {
-      const t = t1 + ((t2 - t1) * s) / steps;
-      const lerp = (a, b, ta, tb) => ({
-        x: tb - ta < 1e-12 ? a.x : ((tb - t) / (tb - ta)) * a.x + ((t - ta) / (tb - ta)) * b.x,
-        y: tb - ta < 1e-12 ? a.y : ((tb - t) / (tb - ta)) * a.y + ((t - ta) / (tb - ta)) * b.y
-      });
-      const A1 = lerp(p0, p1, t0, t1), A2 = lerp(p1, p2, t1, t2), A3 = lerp(p2, p3, t2, t3);
-      const B1 = lerp(A1, A2, t0, t2), B2 = lerp(A2, A3, t1, t3);
-      const C = lerp(B1, B2, t1, t2);
-      out.push({ x: +C.x.toFixed(4), y: +C.y.toFixed(4) });
-    }
+function extractContoursFromDxf(doc, deltaMax = 0.03, importOptions = {}) {
+  if (!doc || !(doc.blocks instanceof Map)) {
+    throw new Error('extractContoursFromDxf espera o documento do leitor próprio (parseDxf). O formato do pacote dxf-parser não é mais aceito aqui.');
   }
-  return out;
-}
-
-function discretizeSplineEntity(ent, deltaMax = 0.03) {
-  const hasCtrl = ent.controlPoints && ent.controlPoints.length >= 2;
-  if (!hasCtrl && ent.fitPoints && ent.fitPoints.length >= 2) {
-    return discretizeFitPointSpline(ent.fitPoints, deltaMax);
-  }
-  const ctrl = ent.controlPoints || [];
-  if (ctrl.length < 2) return [];
-  if (ctrl.length === 4 && (!ent.knotValues || ent.knotValues.length === 0)) {
-    return deCasteljauCubicAdaptive(ctrl[0], ctrl[1], ctrl[2], ctrl[3], deltaMax);
-  }
-
-  const degree = ent.degreeOfSplineCurve || Math.min(3, ctrl.length - 1);
-  let knots = ent.knotValues;
-  if (!knots || knots.length !== ctrl.length + degree + 1) {
-    knots = [];
-    for (let i = 0; i <= degree; i++) knots.push(0);
-    const internal = ctrl.length - degree - 1;
-    for (let i = 1; i <= internal; i++) knots.push(i / (internal + 1));
-    for (let i = 0; i <= degree; i++) knots.push(1);
-  }
-
-  const uMin = knots[degree];
-  const uMax = knots[knots.length - degree - 1];
-  const pts = [];
-
-  const subdivideSegment = (u0, p0, u1, p1, depth) => {
-    const uMid = (u0 + u1) * 0.5;
-    const pMid = evaluateNurbsPoint(uMid, degree, ctrl, knots, ent.weights);
-    const chordMidX = (p0.x + p1.x) * 0.5;
-    const chordMidY = (p0.y + p1.y) * 0.5;
-    const sagitta = Math.hypot(pMid.x - chordMidX, pMid.y - chordMidY);
-
-    if (sagitta <= deltaMax || depth >= 8) {
-      pts.push(p1);
-    } else {
-      subdivideSegment(u0, p0, uMid, pMid, depth + 1);
-      subdivideSegment(uMid, pMid, u1, p1, depth + 1);
-    }
-  };
-
-  const pStart = evaluateNurbsPoint(uMin, degree, ctrl, knots, ent.weights);
-  const pEnd = evaluateNurbsPoint(uMax, degree, ctrl, knots, ent.weights);
-  pts.push(pStart);
-  subdivideSegment(uMin, pStart, uMax, pEnd, 0);
-  return pts;
+  return analyzeDxf(doc, { chordTol: deltaMax }, importOptions);
 }
 
 // =========================================================================
-// 3. CAD HEALING: ENCADEAMENTO DE SEGMENTOS VIA R-TREE (CHAINING & WELDING)
+// 4. RAIO INSCRITO E OFFSET
 // =========================================================================
-
-function chainLooseSegmentsRTree(rawSegments, epsChain = 0.25, epsDegenerate = 0.02) {
-  let openChainCount = 0;
-  // 1. Filtra segmentos degenerados (comprimento < epsDegenerate)
-  const validSegs = rawSegments.filter(
-    s => Math.hypot(s.p2.x - s.p1.x, s.p2.y - s.p1.y) >= epsDegenerate
-  ).map((s, idx) => ({ id: idx, p1: s.p1, p2: s.p2, used: false }));
-
-  if (validSegs.length === 0) { const e = []; e.openChainCount = 0; return e; }
-
-  // 2. Indexa todas as extremidades na R-Tree para busca de vizinhos em O(log V)
-  const endpointTree = new RTree2D(8);
-  const entries = [];
-  for (const seg of validSegs) {
-    entries.push({
-      minX: seg.p1.x - epsChain, minY: seg.p1.y - epsChain,
-      maxX: seg.p1.x + epsChain, maxY: seg.p1.y + epsChain,
-      data: { seg, end: 1, pt: seg.p1 }
-    });
-    entries.push({
-      minX: seg.p2.x - epsChain, minY: seg.p2.y - epsChain,
-      maxX: seg.p2.x + epsChain, maxY: seg.p2.y + epsChain,
-      data: { seg, end: 2, pt: seg.p2 }
-    });
-  }
-  endpointTree.loadBulk(entries);
-
-  const polygons = [];
-  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-
-  for (let i = 0; i < validSegs.length; i++) {
-    const startSeg = validSegs[i];
-    if (startSeg.used) continue;
-    startSeg.used = true;
-
-    const ring = [startSeg.p1, startSeg.p2];
-    let closed = false;
-
-    while (!closed) {
-      const tail = ring[ring.length - 1];
-      const candidates = endpointTree.search({
-        minX: tail.x - epsChain, minY: tail.y - epsChain,
-        maxX: tail.x + epsChain, maxY: tail.y + epsChain
-      });
-
-      let bestMatch = null;
-      let bestDist = Infinity;
-
-      for (const cand of candidates) {
-        if (cand.seg.used) continue;
-        const d = dist(tail, cand.pt);
-        if (d <= epsChain && d < bestDist) {
-          bestDist = d;
-          bestMatch = cand;
-        }
-      }
-
-      if (bestMatch) {
-        bestMatch.seg.used = true;
-        const nextPt = bestMatch.end === 1 ? bestMatch.seg.p2 : bestMatch.seg.p1;
-        ring.push(nextPt);
-        if (ring.length >= 3 && dist(ring[0], nextPt) <= epsChain) {
-          ring.pop(); // Fecha sem duplicar o vértice inicial
-          closed = true;
-        }
-      } else {
-        if (ring.length >= 3 && dist(ring[0], tail) <= epsChain * 2) {
-          ring.pop();
-          closed = true;
-        }
-        break;
-      }
-    }
-
-    if (closed && ring.length >= 3) {
-      polygons.push(simplifyCollinearVertices(ring));
-    } else if (ring.length >= 2) {
-      openChainCount++;
-    }
-  }
-
-  polygons.openChainCount = openChainCount;
-  return polygons;
-}
-
-/**
- * Remove vértices redundantes ou colineares sobrepostos em varredura angular.
- */
-function simplifyCollinearVertices(pts, epsDist = 0.02, epsCross = 1e-3) {
-  if (pts.length <= 3) return pts;
-  const cleaned = [];
-  for (let i = 0; i < pts.length; i++) {
-    const prev = cleaned[cleaned.length - 1];
-    if (!prev || Math.hypot(pts[i].x - prev.x, pts[i].y - prev.y) > epsDist) {
-      cleaned.push(pts[i]);
-    }
-  }
-  if (cleaned.length <= 3) return cleaned;
-
-  const result = [];
-  const n = cleaned.length;
-  for (let i = 0; i < n; i++) {
-    const pPrev = cleaned[(i - 1 + n) % n];
-    const pCurr = cleaned[i];
-    const pNext = cleaned[(i + 1) % n];
-    const v1x = pCurr.x - pPrev.x, v1y = pCurr.y - pPrev.y;
-    const v2x = pNext.x - pCurr.x, v2y = pNext.y - pCurr.y;
-    const cross = Math.abs(v1x * v2y - v1y * v2x);
-    if (cross > epsCross) {
-      result.push(pCurr);
-    }
-  }
-  return result.length >= 3 ? result : cleaned;
-}
-
-// =========================================================================
-// 4. EXTRAÇÃO UNIFICADA DE CONTORNOS DXF
-// =========================================================================
-
-function extractContoursFromDxf(dxf, deltaMax = 0.03) {
-  const contours = [];
-  const looseSegments = [];
-  const entities = dxf.entities || [];
-
-  entities.forEach((ent, idx) => {
-    if ((ent.type === 'LWPOLYLINE' || ent.type === 'POLYLINE') && ent.vertices && ent.vertices.length >= 2) {
-      const vList = ent.vertices;
-      const pts = [];
-      const isClosed = Boolean(ent.shape || ent.closed || (vList.length >= 3 && Math.hypot(vList[0].x - vList[vList.length - 1].x, vList[0].y - vList[vList.length - 1].y) < 0.2));
-
-      const count = isClosed ? vList.length : vList.length - 1;
-      for (let i = 0; i < count; i++) {
-        const v1 = vList[i];
-        const v2 = vList[(i + 1) % vList.length];
-        if (v1.bulge && Math.abs(v1.bulge) > 1e-5) {
-          const arcPts = discretizeBulgeSegment(v1, v2, v1.bulge, deltaMax);
-          pts.push(...arcPts.slice(0, -1));
-        } else {
-          pts.push({ x: v1.x, y: v1.y });
-        }
-      }
-
-      if (isClosed && pts.length >= 3) {
-        if (Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y) < 0.05) {
-          pts.pop();
-        }
-        const bbox = getBoundingBox(pts);
-        const signedArea = computeSignedArea(pts);
-        const trueArea = +(Math.abs(signedArea)).toFixed(2) || bbox.area;
-        contours.push({ id: `C_${idx}`, type: 'POLYLINE', points: pts, bbox, signedArea, trueArea });
-      } else {
-        for (let i = 0; i < pts.length - 1; i++) {
-          looseSegments.push({ p1: pts[i], p2: pts[i + 1] });
-        }
-      }
-    } else if (ent.type === 'CIRCLE' && ent.center && ent.radius) {
-      const pts = discretizeArcAdaptive(ent.center.x, ent.center.y, ent.radius, 0, Math.PI * 2, true, deltaMax);
-      pts.pop(); // Remove ponto final coincidente com 0 rad
-      const bbox = getBoundingBox(pts);
-      const trueArea = +(Math.PI * ent.radius * ent.radius).toFixed(2);
-      contours.push({ id: `C_${idx}`, type: 'CIRCLE', radius: ent.radius, points: pts, bbox, signedArea: trueArea, trueArea });
-    } else if (ent.type === 'ARC' && ent.center && ent.radius) {
-      const startRad = ent.startAngle > Math.PI * 2 ? (ent.startAngle * Math.PI) / 180 : ent.startAngle;
-      const endRad = ent.endAngle > Math.PI * 2 ? (ent.endAngle * Math.PI) / 180 : ent.endAngle;
-      const arcPts = discretizeArcAdaptive(ent.center.x, ent.center.y, ent.radius, startRad, endRad, true, deltaMax);
-      for (let i = 0; i < arcPts.length - 1; i++) {
-        looseSegments.push({ p1: arcPts[i], p2: arcPts[i + 1] });
-      }
-    } else if (ent.type === 'SPLINE') {
-      const spPts = discretizeSplineEntity(ent, deltaMax);
-      if (spPts.length >= 3 && Math.hypot(spPts[0].x - spPts[spPts.length - 1].x, spPts[0].y - spPts[spPts.length - 1].y) < 0.25) {
-        spPts.pop();
-        const bbox = getBoundingBox(spPts);
-        const signedArea = computeSignedArea(spPts);
-        contours.push({ id: `SP_${idx}`, type: 'SPLINE', points: spPts, bbox, signedArea, trueArea: +(Math.abs(signedArea)).toFixed(2) });
-      } else {
-        for (let i = 0; i < spPts.length - 1; i++) {
-          looseSegments.push({ p1: spPts[i], p2: spPts[i + 1] });
-        }
-      }
-    } else if (ent.type === 'LINE' && ent.vertices && ent.vertices.length === 2) {
-      looseSegments.push({
-        p1: { x: ent.vertices[0].x, y: ent.vertices[0].y },
-        p2: { x: ent.vertices[1].x, y: ent.vertices[1].y }
-      });
-    }
-  });
-
-  if (looseSegments.length > 0) {
-    const chainedPolys = chainLooseSegmentsRTree(looseSegments);
-    chainedPolys.forEach((pts, idx) => {
-      const bbox = getBoundingBox(pts);
-      const signedArea = computeSignedArea(pts);
-      contours.push({
-        id: `ST_${idx}`,
-        type: 'CHAINED_RING',
-        points: pts,
-        bbox,
-        signedArea,
-        trueArea: +(Math.abs(signedArea)).toFixed(2) || bbox.area
-      });
-    });
-  }
-
-  return contours.filter(c => c.bbox.width > 0.5 && c.bbox.height > 0.5);
-}
-
-// =========================================================================
-// 5. OFFSET POLIGONAL (MITER / BEVEL JOIN) E EIXO MEDIAL (RAIO INSCRITO R_MAX)
-// =========================================================================
-
-function isPointInPolygon(pt, vs) {
-  let inside = false;
-  for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-    const xi = vs[i].x, yi = vs[i].y, xj = vs[j].x, yj = vs[j].y;
-    const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
-      (pt.x < (xj - xi) * (pt.y - yi) / ((yj - yi) || 1e-9) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-function pointToSegmentDist(px, py, x1, y1, x2, y2) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-  const lenSq = dx * dx + dy * dy;
-  if (lenSq === 0) return Math.hypot(px - x1, py - y1);
-  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
-  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
-}
 
 /**
  * Calcula o Raio Máximo Inscrito R_max (Transformada do Eixo Medial / Voronoi Interno)
@@ -613,9 +205,14 @@ function offsetPolygonRing(pts, offsetDist, miterLimit = 2.0) {
 }
 
 // =========================================================================
-// 6. ÁRVORE TOPOLÓGICA DE PEÇAS E FUROS (CONTOUR CONTAINMENT TREE)
+// 5. ÁRVORE TOPOLÓGICA DE PEÇAS E FUROS
 // =========================================================================
 
+/**
+ * Classifica contornos em peças (nível par) e furos (nível ímpar). Quando o contorno traz `parentId`
+ * (calculado pelo DXF Doctor com teste de contenção robusto e molduras já removidas), usa-o; senão,
+ * calcula a contenção aqui (caixa + ponto em polígono).
+ */
 function classifyPartsAndHoles(rawContours, minHoleSize, nestingParams = {}) {
   const kerf_width = Number(nestingParams.kerf_width ?? 0.4);
   const part_clearance = Number(nestingParams.part_clearance ?? 5.6);
@@ -626,18 +223,29 @@ function classifyPartsAndHoles(rawContours, minHoleSize, nestingParams = {}) {
   );
 
   const sorted = [...rawContours].sort((a, b) => b.bbox.area - a.bbox.area);
-  const parentsMap = new Map();
+  const byId = new Map(sorted.map(c => [c.id, c]));
+  const hasTree = sorted.length > 0 && sorted.every(c => c.parentId !== undefined);
+  const ancestorsOf = new Map();
 
-  for (let i = 0; i < sorted.length; i++) {
-    parentsMap.set(sorted[i].id, []);
-    for (let j = 0; j < i; j++) {
-      const p = sorted[j], c = sorted[i];
-      if (
-        c.bbox.minX >= p.bbox.minX - 0.1 && c.bbox.maxX <= p.bbox.maxX + 0.1 &&
-        c.bbox.minY >= p.bbox.minY - 0.1 && c.bbox.maxY <= p.bbox.maxY + 0.1 &&
-        isPointInPolygon(c.points[0], p.points)
-      ) {
-        parentsMap.get(c.id).push(p.id);
+  if (hasTree) {
+    for (const c of sorted) {
+      const anc = [];
+      let p = c.parentId;
+      while (p && byId.has(p)) { anc.unshift(p); p = byId.get(p).parentId; }
+      ancestorsOf.set(c.id, anc);
+    }
+  } else {
+    for (let i = 0; i < sorted.length; i++) {
+      ancestorsOf.set(sorted[i].id, []);
+      for (let j = 0; j < i; j++) {
+        const p = sorted[j], c = sorted[i];
+        if (
+          c.bbox.minX >= p.bbox.minX - 0.1 && c.bbox.maxX <= p.bbox.maxX + 0.1 &&
+          c.bbox.minY >= p.bbox.minY - 0.1 && c.bbox.maxY <= p.bbox.maxY + 0.1 &&
+          isPointInPolygon(c.points[0], p.points)
+        ) {
+          ancestorsOf.get(c.id).push(p.id);
+        }
       }
     }
   }
@@ -646,9 +254,9 @@ function classifyPartsAndHoles(rawContours, minHoleSize, nestingParams = {}) {
   const holeToParent = new Map();
 
   sorted.forEach(c => {
-    const anc = parentsMap.get(c.id) || [];
+    const anc = ancestorsOf.get(c.id) || [];
     if (anc.length % 2 === 0) {
-      // Nível Par (0, 2...): Contorno Externo de Peça -> Força orientação Anti-Horária (CCW, As > 0)
+      // Nível par (0, 2...): contorno externo de peça -> anti-horário (CCW, As > 0)
       const normRaw = c.points.map(p => ({
         x: +(p.x - c.bbox.minX).toFixed(3),
         y: +(p.y - c.bbox.minY).toFixed(3)
@@ -680,9 +288,10 @@ function classifyPartsAndHoles(rawContours, minHoleSize, nestingParams = {}) {
         inscribed_center: mat.center
       };
 
+      const n = parts.length + 1;
       parts.push({
-        id: `PECA_${parts.length + 1}`,
-        name: `Peça #${parts.length + 1}`,
+        id: `PECA_${n}`,
+        name: `Peça #${n}`,
         sourceContourId: c.id,
         origin: 'DXF Original',
         width: bbox.width,
@@ -699,10 +308,15 @@ function classifyPartsAndHoles(rawContours, minHoleSize, nestingParams = {}) {
         holes: [],
         allowed_rotations_deg: allowedRotations,
         allow_mirroring: false,
-        quantity_required: 1
+        quantity_required: 1,
+        blockName: c.blockName || null,
+        labels: c.labels || [],
+        layers: c.layers || [],
+        frameId: c.frameId || null,
+        selfIntersecting: !!c.selfIntersecting
       });
     } else {
-      // Nível Ímpar (1, 3...): Furo Interno -> Vincula à peça mãe imediata
+      // Nível ímpar (1, 3...): furo -> vincula à peça mãe imediata
       holeToParent.set(c.id, anc[anc.length - 1]);
     }
   });
@@ -717,7 +331,7 @@ function classifyPartsAndHoles(rawContours, minHoleSize, nestingParams = {}) {
       y: +(p.y - parentPart.origMinY).toFixed(3)
     }));
 
-    // Furo interno recebe orientação Horária (CW, As < 0)
+    // Furo interno: horário (CW, As < 0)
     const cwPts = enforceWindingOrder(relRaw, false);
     const hb = getBoundingBox(cwPts);
     const mat = computeMaxInscribedCircle(cwPts, hb);
@@ -747,7 +361,7 @@ function classifyPartsAndHoles(rawContours, minHoleSize, nestingParams = {}) {
     }
   });
 
-  // Área líquida de material: contorno externo menos furos (a área bruta continua em `area` para heurísticas de caixa)
+  // Área líquida de material: contorno externo menos furos
   parts.forEach(pt => {
     const holesArea = pt.holes.reduce((acc, h) => acc + h.area, 0);
     pt.netArea = +Math.max(0, pt.area - holesArea).toFixed(2);
@@ -755,6 +369,135 @@ function classifyPartsAndHoles(rawContours, minHoleSize, nestingParams = {}) {
 
   return parts;
 }
+
+// =========================================================================
+// 6. CÓPIAS IDÊNTICAS -> UMA PEÇA COM QUANTIDADE
+// =========================================================================
+
+/**
+ * Agrupa peças congruentes (mesma forma e furos, a menos de translação e rotação). A primeira ocorrência
+ * vira o representante; `quantity_detected` = número de cópias no desenho; `instances` guarda onde e com
+ * que giro cada cópia estava (para relatório e, no futuro, reproduzir o layout original).
+ * Peças espelhadas NÃO são agrupadas (cortar o espelho exige virar a chapa); são apenas apontadas em `mirrorOf`.
+ */
+/** Ângulo em [0, 360) arredondado a 0,01° (evita "360" por ruído numérico). */
+function normDeg(d) {
+  let a = Math.round(d * 100) / 100;
+  a = ((a % 360) + 360) % 360;
+  return a >= 359.995 ? 0 : +a.toFixed(2);
+}
+
+function groupIdenticalParts(parts, { tol = 0.1 } = {}) {
+  const classes = [];
+  for (const p of parts) {
+    const d = describe(p.points, p.holes.map(h => h.points));
+    let hit = null, how = null;
+    for (const cl of classes) {
+      const m = matchParts(cl.desc, d, { tol });
+      if (m) { hit = cl; how = m; break; }
+    }
+    if (hit) hit.members.push({ part: p, theta: how.theta, desc: d });
+    else classes.push({ desc: d, members: [{ part: p, theta: 0, desc: d }] });
+  }
+  // Representante = cópia com a menor caixa alinhada aos eixos (orientação "mais deitada"; é a partir dela
+  // que o motor aplica os giros permitidos). Empate: ordem do desenho.
+  const order = (m) => Number(String(m.part.sourceContourId || '').replace(/\D/g, '')) || 0;
+  for (const cl of classes) {
+    let best = cl.members[0];
+    for (const m of cl.members) {
+      const a = m.part.bboxArea, b = best.part.bboxArea;
+      if (a < b - 1e-6 * Math.max(a, b) || (Math.abs(a - b) <= 1e-6 * Math.max(a, b) && order(m) < order(best))) best = m;
+    }
+    cl.rep = best.part;
+    cl.desc = best.desc;
+    cl.instances = cl.members
+      .slice().sort((a, b) => order(a) - order(b))
+      .map(m => ({
+        sourceContourId: m.part.sourceContourId,
+        x: m.part.origMinX, y: m.part.origMinY,
+        rotationDeg: normDeg((m.theta - best.theta) * 180 / Math.PI),
+        frameId: m.part.frameId || null
+      }));
+  }
+
+  // espelhos (só informativo)
+  for (let i = 0; i < classes.length; i++) {
+    for (let j = 0; j < i; j++) {
+      if (classes[i].mirrorOf) break;
+      const m = matchParts(classes[j].desc, classes[i].desc, { tol, allowMirror: true });
+      if (m && m.mirror) classes[i].mirrorOf = j;
+    }
+  }
+
+  // nomes: rótulo de texto dentro da peça > nome do bloco > "Peça #n"
+  const usedNames = new Map();
+  const out = classes.map((cl, idx) => {
+    const n = idx + 1;
+    const rep = cl.rep;
+    let base = (rep.labels && rep.labels[0]) ? rep.labels[0].split('\n')[0].trim().slice(0, 40) : (rep.blockName || '');
+    if (!base) base = `Peça #${n}`;
+    const k = (usedNames.get(base) || 0) + 1;
+    usedNames.set(base, k);
+    const name = k > 1 ? `${base} (${k})` : base;
+    const holes = rep.holes.map((h, hi) => ({ ...h, id: `FURO_${hi + 1}_PECA_${n}` }));
+    return {
+      ...rep,
+      id: `PECA_${n}`,
+      name,
+      holes,
+      inner_holes: holes,
+      usable_holes: holes.filter(h => h.usableHole),
+      quantity_detected: cl.instances.length,
+      instances: cl.instances,
+      mirrorOf: cl.mirrorOf !== undefined ? `PECA_${cl.mirrorOf + 1}` : null
+    };
+  });
+  return out;
+}
+
+/**
+ * Pipeline completo de catálogo: documento DXF -> contornos (Doctor) -> peças/furos -> cópias agrupadas.
+ * @returns {{catalogParts:Array, report:Object, frames:Array, warnings:string[]}}
+ */
+function buildCatalogFromDxf(doc, nestingParams = {}, importOptions = {}) {
+  const opt = normalizeImportOptions(importOptions);
+  const tol = Number(nestingParams.chordal_tolerance) || 0.03;
+  const contours = extractContoursFromDxf(doc, tol, opt);
+  let parts = classifyPartsAndHoles(contours, Number(nestingParams.min_hole_size ?? 15), nestingParams);
+  const report = contours.report;
+  const rawCount = parts.length;
+  if (importOptions.groupIdentical !== false && parts.length > 1) {
+    parts = groupIdenticalParts(parts, { tol: Math.max(0.1, 3 * tol) });
+    const grouped = parts.filter(p => p.quantity_detected > 1);
+    if (grouped.length) {
+      report.items.push({
+        severity: 'info', code: 'IDENTICAL_GROUPED',
+        message: `${rawCount} peças desenhadas = ${parts.length} peça(s) diferente(s); quantidades preenchidas pelas cópias: ` +
+          parts.map(p => `${p.name} ×${p.quantity_detected}`).join(', ') + '.'
+      });
+    }
+    const mirrors = parts.filter(p => p.mirrorOf);
+    if (mirrors.length) {
+      report.items.push({
+        severity: 'info', code: 'MIRRORED_PARTS',
+        message: `Peças espelhadas entre si (mantidas separadas): ` + mirrors.map(p => `${p.name} ↔ ${parts.find(q => q.id === p.mirrorOf).name}`).join(', ') + '.'
+      });
+    }
+  } else {
+    parts.forEach(p => { p.quantity_detected = 1; p.instances = [{ sourceContourId: p.sourceContourId, x: p.origMinX, y: p.origMinY, rotationDeg: 0, frameId: p.frameId }]; });
+  }
+  const selfX = parts.filter(p => p.selfIntersecting);
+  if (selfX.length) {
+    report.items.push({ severity: 'alto', code: 'SELF_INTERSECTING_PARTS', message: `Peças com contorno que cruza a si mesmo: ${selfX.map(p => p.name).join(', ')}. Corrija no CAD antes de cortar.` });
+  }
+  report.summary.catalogParts = parts.length;
+  report.summary.partInstances = parts.reduce((s, p) => s + (p.quantity_detected || 1), 0);
+  return { catalogParts: parts, report, frames: contours.frames || [], warnings: contours.warnings || [] };
+}
+
+// =========================================================================
+// 7. CHAPA CUSTOMIZADA
+// =========================================================================
 
 /**
  * Extrai a topologia completa da Chapa Principal via .DXF (Contorno Externo CCW + Obstáculos CW).
@@ -821,19 +564,24 @@ function buildCustomSheetFromContours(contours) {
 }
 
 module.exports = {
-  discretizeArcAdaptive,
-  evaluateNurbsPoint,
-  discretizeSplineEntity,
-  chainLooseSegmentsRTree,
+  // geometria (reexportada de geometry/primitives para compatibilidade)
   getBoundingBox,
   computeSignedArea,
-  enforceWindingOrder,
-  computeEdgeNormals,
   isPointInPolygon,
   pointToSegmentDist,
+  enforceWindingOrder,
+  computeEdgeNormals,
+  // curvas
+  discretizeArcAdaptive,
+  evaluateNurbsPoint,
+  // DXF
+  parseDxf,
+  extractContoursFromDxf,
+  // peças
   computeMaxInscribedCircle,
   offsetPolygonRing,
-  extractContoursFromDxf,
   classifyPartsAndHoles,
+  groupIdenticalParts,
+  buildCatalogFromDxf,
   buildCustomSheetFromContours
 };

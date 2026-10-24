@@ -1,11 +1,12 @@
 {
   "name": "teste-de-nesting",
-  "version": "5.2",
+  "version": "5.3.0",
   "description": "",
   "main": "index.js",
   "scripts": {
     "dev": "node .",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test/run.js && node test/dxf_doctor.js && node test/engine_units.js && node test/client_smoke.js",
+    "test:ui": "node test/ui_e2e.js"
   },
   "keywords": [],
   "author": "",

@@ -273,4 +273,4 @@ class RTree2D {
   }
 }
 
-module.exports = { RTree2D };
+module.exports = { RTree2D };

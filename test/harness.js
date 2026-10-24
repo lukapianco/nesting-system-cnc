@@ -2,31 +2,31 @@
 'use strict';
 const path = require('path');
 const { Worker } = require('worker_threads');
-const DxfParser = require('dxf-parser');
 const { buildSampleDxf } = require('../presets');
 const { buildJob } = require('../jobBuilder');
-const { extractContoursFromDxf, buildCustomSheetFromContours } = require('../cadParser');
+const { parseDxf, extractContoursFromDxf, buildCustomSheetFromContours } = require('../cadParser');
 
 function parsePreset(name) {
-  return new DxfParser().parseSync(buildSampleDxf(name));
+  return parseDxf(buildSampleDxf(name));
 }
 
 function parseText(dxfText) {
-  return new DxfParser().parseSync(dxfText);
+  return parseDxf(dxfText);
 }
 
 function sheetFromPreset(name, tol = 0.03) {
-  return buildCustomSheetFromContours(extractContoursFromDxf(parsePreset(name), tol));
+  return buildCustomSheetFromContours(extractContoursFromDxf(parsePreset(name), tol, { frameMode: 'part' }));
 }
 
 /** @returns {Promise<{done:Object, records:number, job:Object, ms:number}>} */
-function runPreset({ parts = 'icamento', dxfText = null, sheet = null, config = {}, qty = 1 }) {
+/** qty multiplica as cópias encontradas no desenho (x1 = o desenho como está). */
+function runPreset({ parts = 'icamento', dxfText = null, sheet = null, config = {}, qty = 1, importOptions = {} }) {
   const parsed = dxfText ? parseText(dxfText) : parsePreset(parts);
-  const probe = buildJob({ parsedDxf: parsed, config, quantities: {} });
+  const probe = buildJob({ parsedDxf: parsed, config, quantities: {}, importOptions });
   const quantities = {};
-  probe.catalogParts.forEach(p => { quantities[p.id] = typeof qty === 'function' ? qty(p) : qty; });
+  probe.catalogParts.forEach(p => { quantities[p.id] = (typeof qty === 'function' ? qty(p) : qty) * (p.quantity_detected || 1); });
   const sheetObj = sheet ? sheetFromPreset(sheet) : null;
-  const job = buildJob({ parsedDxf: parsed, sheet: sheetObj, config, quantities });
+  const job = buildJob({ parsedDxf: parsed, sheet: sheetObj, config, quantities, importOptions });
 
   return new Promise((resolve, reject) => {
     const t0 = Date.now();

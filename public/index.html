@@ -43,8 +43,54 @@
         <label class="file-dropzone" id="dropzone">
           <input type="file" id="dxfInput" accept=".dxf" hidden />
           <span class="drop-title" id="fileNameLabel">1º Enviar .DXF das Peças de Corte</span>
-          <span class="drop-sub">Discretização Adaptativa: LINE, ARC, CIRCLE, SPLINE, Bulge</span>
+          <span class="drop-sub">Blocos (INSERT/matrizes), LINE, ARC, CIRCLE, ELLIPSE, SPLINE, polilinhas; unidades e layers</span>
         </label>
+
+        <!-- DIAGNÓSTICO DO DXF (DXF Doctor): tudo que foi lido, ignorado, corrigido ou detectado -->
+        <div id="dxfReport" class="dxf-report hidden" aria-live="polite">
+          <div class="dxf-report-head">
+            <strong>Diagnóstico do DXF</strong>
+            <span id="dxfReportStatus" class="dxf-status"></span>
+          </div>
+          <div id="dxfReportFile" class="dxf-report-file"></div>
+          <div id="dxfFrameBanner" class="dxf-frame-banner hidden"></div>
+          <ul id="dxfReportItems" class="dxf-items"></ul>
+          <details class="dxf-options" id="dxfOptions">
+            <summary>Opções de importação</summary>
+            <div class="form-grid" style="margin-top:8px;">
+              <div class="input-group">
+                <label for="dxfUnitsSelect" title="Unidade do desenho. Automático usa o $INSUNITS do arquivo.">Unidade do DXF</label>
+                <select id="dxfUnitsSelect" class="select-input">
+                  <option value="auto" selected>Automática (do arquivo)</option>
+                  <option value="mm">Milímetro</option>
+                  <option value="cm">Centímetro</option>
+                  <option value="m">Metro</option>
+                  <option value="in">Polegada</option>
+                  <option value="ft">Pé</option>
+                </select>
+              </div>
+              <div class="input-group">
+                <label for="dxfFrameModeSelect" title="Moldura = retângulo da chapa desenhado em volta das peças.">Moldura</label>
+                <select id="dxfFrameModeSelect" class="select-input">
+                  <option value="auto" selected>Detectar (não é peça)</option>
+                  <option value="part">Tratar como peça</option>
+                </select>
+              </div>
+              <div class="input-group">
+                <label for="dxfJoinTolInput" title="Pontas a esta distância são consideradas a mesma (costura de contornos).">Tolerância de costura (mm)</label>
+                <input type="number" id="dxfJoinTolInput" value="0.25" min="0.001" max="5" step="0.05" />
+              </div>
+              <div class="input-group">
+                <label for="dxfMaxGapInput" title="Aberturas até este tamanho são fechadas automaticamente (e relatadas). 0 = não fechar.">Fechar aberturas até (mm)</label>
+                <input type="number" id="dxfMaxGapInput" value="1" min="0" max="20" step="0.5" />
+              </div>
+            </div>
+            <label class="checkbox-row"><input type="checkbox" id="dxfGroupIdentical" checked /><span>Cópias idênticas viram quantidade</span></label>
+            <label class="checkbox-row"><input type="checkbox" id="dxfIncludeDashed" /><span>Incluir linhas tracejadas/de centro</span></label>
+            <label class="checkbox-row"><input type="checkbox" id="dxfIncludeHidden" /><span>Incluir layers congeladas/desligadas/não plotáveis</span></label>
+            <div id="dxfLayerList" class="dxf-layers"></div>
+          </details>
+        </div>
 
         <div style="margin-top: 10px;">
           <label class="file-dropzone sheet-dropzone">
@@ -295,6 +341,8 @@
             <span id="progressStrategyText">Velocidade: 0 cálculos/seg</span>
             <span id="progressBestText">Recorde: 0.0%</span>
           </div>
+          <button type="button" id="btnStopKeepBest" class="btn btn-outline btn-sm hidden" style="margin-top:7px;"
+            title="Encerra a busca e entrega o melhor layout encontrado até agora (validado).">Parar e manter o melhor</button>
         </div>
 
         <!-- BARRA DE ZOOM E INSPETOR DE COORDENADAS -->

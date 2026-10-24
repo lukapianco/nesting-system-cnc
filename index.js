@@ -3,13 +3,13 @@
 
 const express = require('express');
 const multer = require('multer');
-const DxfParser = require('dxf-parser');
 const path = require('path');
 const os = require('os');
 const { execSync } = require('child_process');
 const { Worker } = require('worker_threads');
 
-const { extractContoursFromDxf, buildCustomSheetFromContours, classifyPartsAndHoles } = require('./cadParser');
+const { parseDxf, extractContoursFromDxf, buildCustomSheetFromContours, buildCatalogFromDxf } = require('./cadParser');
+const { normalizeNestingParams } = require('./typesAndInterfaces');
 const { buildJob } = require('./jobBuilder');
 const { buildSampleDxf } = require('./presets');
 const { buildDxf } = require('./dxfWriter');
@@ -50,6 +50,7 @@ const HARDWARE = detectHardware();
 let activeWorkers = 0;
 const jobQueue = [];
 const pendingJobs = new Map();      // jobId -> { ..., createdAt }
+const liveJobs = new Map();         // jobId -> job (na fila ou rodando): permite "Parar e manter o melhor"
 const uploadCache = new Map();      // uploadId -> { parsed, createdAt }  (evita reenviar contornos a cada job)
 const jobsByIp = new Map();
 const MAX_JOBS_PER_IP = 3;
@@ -63,18 +64,38 @@ setInterval(() => {
   for (const [id, u] of uploadCache) if (now - u.createdAt > UPLOAD_TTL_MS) uploadCache.delete(id);
 }, 60 * 1000).unref();
 
-function rememberUpload(parsed) {
+function rememberUpload(parsed, fileName = '') {
   if (uploadCache.size >= MAX_CACHED_UPLOADS) uploadCache.delete(uploadCache.keys().next().value);
   const id = `U_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  uploadCache.set(id, { parsed, createdAt: Date.now() });
+  uploadCache.set(id, { parsed, fileName, createdAt: Date.now() });
   return id;
 }
 
 function parseDxfBuffer(buffer) {
-  // DXF antigos (R12) costumam vir em cp1252; se houver caracteres inválidos em UTF-8, usa latin1
-  let text = buffer.toString('utf-8');
-  if (text.includes('\uFFFD')) text = buffer.toString('latin1');
-  return new DxfParser().parseSync(text);
+  // Leitor próprio: detecta DWG/binário, codificação (UTF-8 ou code page do $DWGCODEPAGE) e unidades.
+  return parseDxf(buffer);
+}
+
+/** Erros de leitura de DXF são do arquivo do usuário (422), não do servidor (500). */
+function sendError(res, e, fallbackStatus = 500) {
+  const status = e && e.name === 'DxfReadError' ? 422 : fallbackStatus;
+  res.status(status).json({ error: e.message, code: e.code || undefined });
+}
+
+function parseImportOptions(raw) {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch (_) { return {}; }
+}
+
+/** Monta a resposta de catálogo (upload e reanálise) a partir do DXF lido. */
+function catalogResponse(uploadId, parsed, tol, importOptions, configRaw) {
+  const config = normalizeNestingParams({ ...(configRaw || {}), chordal_tolerance: tol });
+  const { catalogParts, report, frames, warnings } = buildCatalogFromDxf(parsed, config, importOptions);
+  const suggestedSheet = frames.length
+    ? { width: frames[0].width, height: frames[0].height, source: frames[0].id, labels: frames[0].labels }
+    : null;
+  return { uploadId, contourCount: report.summary.closedContours, catalogParts, warnings, report, frames: report.frames, suggestedSheet };
 }
 
 // =========================================================
@@ -89,6 +110,7 @@ function enqueueJob(job, res) {
 
   res.on('close', () => {
     clearInterval(heartbeat);
+    if (job.jobId) liveJobs.delete(job.jobId);
     job.aborted = true;
     if (job.worker) job.worker.terminate();
     if (job.ip) jobsByIp.set(job.ip, Math.max(0, (jobsByIp.get(job.ip) || 1) - 1));
@@ -111,12 +133,15 @@ function runWorker(job) {
   if (job.aborted) return checkQueue();
   activeWorkers++;
 
+  job.stopFlag = new SharedArrayBuffer(4);
+  if (job.stopRequested) Atomics.store(new Int32Array(job.stopFlag), 0, 1);
   const worker = new Worker(path.join(__dirname, 'nestingWorker.js'), {
     workerData: {
       parts: job.parts,
       sheet: job.sheet,
       config: job.config,
-      hardware: HARDWARE
+      hardware: HARDWARE,
+      stopFlag: job.stopFlag
     }
   });
   job.worker = worker;
@@ -141,6 +166,7 @@ function runWorker(job) {
   });
 
   worker.on('exit', () => {
+    if (job.jobId) liveJobs.delete(job.jobId);
     activeWorkers = Math.max(0, activeWorkers - 1);
     checkQueue();
   });
@@ -163,11 +189,24 @@ app.post('/api/upload-dxf', upload.single('dxfFile'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo DXF enviado.' });
     const parsed = parseDxfBuffer(req.file.buffer);
     const tol = Math.max(0.005, Math.min(0.5, Number(req.query.tol) || 0.03));
-    const contours = extractContoursFromDxf(parsed, tol);
-    const catalogParts = classifyPartsAndHoles(contours, 15);
-    res.json({ uploadId: rememberUpload(parsed), contourCount: contours.length, catalogParts, warnings: contours.warnings || [] });
+    const importOptions = parseImportOptions(req.body && req.body.importOptions);
+    const uploadId = rememberUpload(parsed, req.file.originalname);
+    res.json({ ...catalogResponse(uploadId, parsed, tol, importOptions, null), fileName: req.file.originalname });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    sendError(res, e);
+  }
+});
+
+// Reanalisa um upload em cache com outras opções de importação (layers, unidade, moldura, costura)
+app.post('/api/reanalyze-dxf', (req, res) => {
+  try {
+    const { uploadId, importOptions = {}, tol, config = {} } = req.body || {};
+    const cached = uploadCache.get(uploadId);
+    if (!cached) return res.status(410).json({ error: 'Upload expirado ou desconhecido. Envie o .DXF das peças novamente.' });
+    const t = Math.max(0.005, Math.min(0.5, Number(tol) || 0.03));
+    res.json({ ...catalogResponse(uploadId, cached.parsed, t, importOptions, config), fileName: cached.fileName });
+  } catch (e) {
+    sendError(res, e, 400);
   }
 });
 
@@ -176,23 +215,25 @@ app.post('/api/upload-sheet-dxf', upload.single('sheetDxfFile'), (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo DXF de chapa enviado.' });
     const parsed = parseDxfBuffer(req.file.buffer);
     const tol = Math.max(0.005, Math.min(0.5, Number(req.query.tol) || 0.03));
-    const sheet = buildCustomSheetFromContours(extractContoursFromDxf(parsed, tol));
-    res.json({ sheet });
+    // Na chapa, o retângulo externo É a chapa: sem detecção de moldura.
+    const contours = extractContoursFromDxf(parsed, tol, { frameMode: 'part' });
+    const sheet = buildCustomSheetFromContours(contours);
+    res.json({ sheet, report: contours.report });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    sendError(res, e);
   }
 });
 
 app.post('/api/start-job', (req, res) => {
   try {
-    const { uploadId, sheet = null, config = {}, quantities = {} } = req.body;
+    const { uploadId, sheet = null, config = {}, quantities = {}, importOptions = {} } = req.body;
     const cached = uploadCache.get(uploadId);
     if (!cached) {
       return res.status(410).json({ error: 'Upload expirado ou desconhecido (o servidor pode ter reiniciado). Envie o .DXF das peças novamente.' });
     }
-    const job = buildJob({ parsedDxf: cached.parsed, sheet, config, quantities });
+    const job = buildJob({ parsedDxf: cached.parsed, sheet, config, quantities, importOptions });
     const jobId = `J_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    pendingJobs.set(jobId, { parts: job.expandedParts, sheet, config: job.normalizedConfig, createdAt: Date.now(), ip: req.ip });
+    pendingJobs.set(jobId, { jobId, parts: job.expandedParts, sheet, config: job.normalizedConfig, createdAt: Date.now(), ip: req.ip });
     res.json({ jobId, catalogParts: job.catalogParts, expandedCount: job.expandedParts.length, normalizedConfig: job.normalizedConfig, warnings: job.warnings });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -215,7 +256,29 @@ app.get('/api/stream/:jobId', (req, res) => {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
 
+  liveJobs.set(job.jobId, job);
   enqueueJob(job, res);
+});
+
+// "Parar e manter o melhor": encerra a busca; o worker finaliza (retalhos, CAM, validação) e envia o melhor layout
+app.post('/api/stop/:jobId', (req, res) => {
+  const job = liveJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job não encontrado (já terminou?).' });
+  job.stopRequested = true;
+  if (job.stopFlag) {
+    Atomics.store(new Int32Array(job.stopFlag), 0, 1);
+    return res.json({ stopping: true });
+  }
+  // ainda na fila: sai da fila sem resultado
+  const qi = jobQueue.indexOf(job);
+  if (qi >= 0) jobQueue.splice(qi, 1);
+  job.aborted = true;
+  if (!job.res.writableEnded) {
+    job.res.write(`data: ${JSON.stringify({ type: 'error', error: 'Cancelado pelo usuário antes de começar.' })}\n\n`);
+    job.res.end();
+  }
+  liveJobs.delete(job.jobId);
+  res.json({ cancelled: true });
 });
 
 app.get('/api/process-profiles', (req, res) => res.json({ processes: listProcesses() }));
