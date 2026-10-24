@@ -11,7 +11,7 @@ Serve para laser, plasma, oxicorte, jato d'água e router.
 
 O escopo é **só o nesting**. Estoque de chapas, ordens de serviço e rastreio de sobras ficam no sistema de gestão, que conversa com o Prumo pela API.
 
-> Versão atual: **5.7** — veja o [CHANGELOG](CHANGELOG.md).
+> Versão atual: **5.8** — veja o [CHANGELOG](CHANGELOG.md).
 > Manual de operação: [`docs/Manual_Prumo.md`](docs/Manual_Prumo.md).
 > Decisões técnicas: [`docs/adr/`](docs/adr).
 
@@ -52,7 +52,7 @@ Se o executável estiver em outro lugar, aponte com a variável de ambiente `PRU
 A tela tem três colunas: os passos à esquerda, a mesa (o layout na chapa, com régua em mm) no meio e o resultado à direita.
 
 1. **Peças:** arraste o `.dxf` para a tela ou abra um dos exemplos. O diagnóstico mostra o que foi lido, o que foi ignorado e por quê.
-2. **Chapa:** informe comprimento × largura, ou use uma chapa desenhada em DXF. Se o desenho tiver moldura, a chapa já vem ajustada; se tiver uma chapa usada desenhada junto, a tela oferece usá-la.
+2. **Chapa:** informe comprimento × largura, ou use uma chapa desenhada em DXF. Se o desenho tiver moldura, a chapa já vem ajustada; se tiver uma chapa usada desenhada junto, a tela oferece usá-la. Em **Estoque deste cálculo**, diga quantas chapas inteiras e quais retalhos podem ser usados: o cálculo vai chapa a chapa (retalhos primeiro) e mostra uma aba por chapa.
 3. **Corte:** processo e espessura (sugerem kerf e folgas), margem, giro das peças.
 4. **Busca:** tempo de busca e motor (Automático, sparrow ou clássico).
 
@@ -66,8 +66,8 @@ O cálculo começa sozinho e recomeça quando a entrada muda (o anterior é para
 | `POST` | `/api/upload-dxf` | Lê o DXF de peças (`multipart`, campo `dxfFile`) e devolve peças, furos, cópias, molduras, candidatos a chapa usada (`sheetCandidates`) e diagnóstico |
 | `POST` | `/api/reanalyze-dxf` | Relê o último arquivo com outras opções de importação (camadas, moldura, unidade, `sheetContour` para usar um contorno como chapa) |
 | `POST` | `/api/upload-sheet-dxf` | Lê o DXF de uma chapa irregular (com furos/defeitos) |
-| `POST` | `/api/start-job` | Cria o job (`uploadId`, `config`, `quantities`) e devolve o `jobId` |
-| `GET` | `/api/stream/:jobId` | Progresso em tempo real (SSE): `queued`, `progress`, `done`, `error`. Fechar a conexão cancela o job e o processo do otimizador |
+| `POST` | `/api/start-job` | Cria o job (`uploadId`, `config`, `quantities`) e devolve o `jobId` e a lista de chapas que serão usadas (`stock`). Estoque: `config.stock_full_sheets` e `config.stock_remnants` (`[{width, height, quantity, ref}]`) |
+| `GET` | `/api/stream/:jobId` | Progresso em tempo real (SSE): `queued`, `sheet-start` (várias chapas), `progress`, `done`, `error`. Com várias chapas, o `done` traz `multi: true`, `sheets[]` (um plano validado por chapa), `unplacedParts`, `skipped` e `summary`. Fechar a conexão cancela o job e o processo do otimizador |
 | `POST` | `/api/stop/:jobId` | Para e entrega o melhor layout já validado |
 | `GET` | `/api/process-profiles`, `/api/recommend-params` | Perfis de processo e parâmetros sugeridos |
 | `POST` | `/api/export-dxf` | DXF de corte (opções de camadas no corpo) |
@@ -85,6 +85,7 @@ bash bench/public/fetch-instances.sh                         # baixa as 13 inst�
 node bench/public/run.js --time 60 --seeds 5                 # motor clássico
 node bench/public/run.js --engine sparrow --time 60 --seeds 5
 node bench/paralelo.js                                        # como dividir as threads da sua máquina (ADR 008)
+node bench/multichapa.js --time 20                            # lote de várias chapas: clássico × Automático (ADR 009)
 ```
 
 O benchmark mede a densidade e a validade **fora do motor**: polígonos posicionados, validador independente e contagem de peças. As tabelas estão no CHANGELOG e em `bench/public/results/`. O protocolo está nas ADRs 005 e 006.

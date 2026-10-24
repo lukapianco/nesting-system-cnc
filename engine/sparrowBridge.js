@@ -45,7 +45,8 @@ function orientationFor(allowedAngles) {
  * Monta a instância de strip packing.
  * @param {{key:string, points:{x,y}[], demand:number}[]} types - um item por TIPO de peça (contorno externo, ângulo 0)
  * @param {{stripHeight:number, gap:number, allowedAngles:number[], name?:string,
- *          sheet?:{outer:{x,y}[], holes:{x,y}[][], border:number}}} o - sheet: chapa desenhada (coordenadas da chapa)
+ *          sheet?:{outer:{x,y}[], holes:{x,y}[][], border:number, fixed?:{points:{x,y}[], offset:number}[]}}} o
+ *          sheet: chapa desenhada (coordenadas da chapa); fixed: peças já colocadas que viram obstáculos (V5.8)
  */
 function buildInstance(types, o) {
   const g = o.gap / 2 + SAFETY;
@@ -53,7 +54,9 @@ function buildInstance(types, o) {
     outer: o.sheet.outer.map(p => [p.x, p.y]),
     holes: (o.sheet.holes || []).map(h => h.map(p => [p.x, p.y])),
     offset: o.sheet.border - g,
-    shift: [-(o.sheet.border - g), -(o.sheet.border - g)]
+    shift: [-(o.sheet.border - g), -(o.sheet.border - g)],
+    // V5.8: peças já colocadas nesta chapa (reabastecimento), contorno nominal em coordenadas da chapa
+    ...(o.sheet.fixed && o.sheet.fixed.length ? { fixed: o.sheet.fixed.map(f => ({ ring: f.points.map(p => [p.x, p.y]), offset: f.offset })) } : {})
   } : undefined;
   return {
     instance: {
@@ -127,8 +130,8 @@ function runSparrow(instance, { timeS = 60, seed = 1, workers = 1, early = false
 /** Semente de cada busca paralela: a busca 0 usa a semente pedida (igual à V5.6); as outras ficam longe dela, para que
  *  "Calcular de novo" (semente + 1) não repita buscas da rodada anterior. */
 /** Threads do modo reproduzível: fixas, para que o plano não dependa da máquina (numa máquina com menos núcleos ele
- *  só demora mais). 4 = 2 buscas × 2 threads com a política automática. */
-const REPRODUCIBLE_THREADS = 4;
+ *  só demora mais). 6 = 2 buscas × 3 threads com a política automática (V5.8). */
+const REPRODUCIBLE_THREADS = 6;
 
 function searchSeed(seed, i) { return i === 0 ? seed : seed + i * 100003; }
 
@@ -140,9 +143,11 @@ function searchSeed(seed, i) { return i === 0 ? seed : seed + i * 100003; }
 function splitThreads(threads, searches = 0) {
   const t = Math.max(1, Math.floor(threads));
   if (searches > 0) { const k = Math.min(t, Math.floor(searches)); return { searches: k, workers: Math.max(1, Math.floor(t / k)) }; }
-  // automático: buscas de 2 threads (até 1 thread sobrando vira mais uma busca de 1)
-  const k = Math.max(1, Math.floor(t / 2));
-  return { searches: k, workers: t >= 2 ? 2 : 1 };
+  // automático (V5.8, medido num i5-12400 com 11 threads, 60 s, 3 sementes, 4 instâncias): buscas de 3 threads
+  // ganharam (3×3: 79,14% de média; 5×2: 78,75; 2×4: 78,69; 1×11: 78,62; 11×1: 77,53). As threads que sobram
+  // da divisão vão para as buscas (7 threads = 2 buscas de 3; 4 threads = 1 busca de 4)
+  const k = Math.max(1, Math.floor(t / 3));
+  return { searches: k, workers: Math.max(1, Math.floor(t / k)) };
 }
 
 /**

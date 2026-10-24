@@ -1,6 +1,6 @@
 # ADR 008 — Várias buscas em paralelo e resultado reproduzível no otimizador sparrow
 
-**Status:** aceito (V5.7) · **Plano:** fase 3 (multi-start e orçamento por iterações) · **Complementa:** ADR 006 e 007
+**Status:** aceito (V5.7); divisão de threads revista na V5.8 (medição com 12 threads) · **Plano:** fase 3 (multi-start e orçamento por iterações) · **Complementa:** ADR 006 e 007
 
 ## Contexto
 
@@ -72,3 +72,25 @@ livre e preso a 1 núcleo, e com 2 threads livre e preso a 1 núcleo (de 1,2 s a
   biblioteca do sistema podem diferir na última casa; isso não foi medido.
 - A mudança no sparrow é pequena e está em `PRUMO_MODIFICACOES.md`: o critério de parada informa a fração do
   orçamento usada (`budget_progress`), e a compressão usa essa fração quando ela existe. Sem `--budget`, nada muda.
+
+## Revisão V5.8: divisão medida com 12 threads
+
+O usuário rodou o `bench/paralelo.js` num Intel Core i5-12400 (6 núcleos, 12 threads; 11 threads no teste, 60 s,
+3 sementes, 4 instâncias). Arquivo: `bench/public/results/paralelo/paralelo_12th_Gen_Intel_R_Core_TM_i5_12400_11t_60s.json`.
+
+| Instância | 1 × 11 | 11 × 1 | 5 × 2 | 3 × 3 | 2 × 4 |
+|---|---|---|---|---|---|
+| jakobs2 | 83,09 | 80,40 | 81,79 | 82,88 | 82,39 |
+| swim | 75,38 | 75,05 | 75,94 | **76,66** | 76,11 |
+| blaz1 | 82,61 | 81,78 | **82,94** | 82,69 | 82,58 |
+| shapes1 | 73,39 | 72,90 | 74,31 | **74,34** | 73,66 |
+| média | 78,62 | 77,53 | 78,75 | **79,14** | 78,69 |
+
+* Buscas de 3 threads ganharam na média (+0,5 ponto sobre uma busca só com 11 threads, +1,6 sobre 11 buscas de 1).
+  Com 3 sementes por configuração, as diferenças entre 3×3, 5×2 e 2×4 são pequenas; a de 11×1 é clara.
+* Nova política automática: buscas de 3 threads (`k = ⌊t/3⌋`, as threads que sobram vão para as buscas). 12 threads
+  = 4 buscas de 3; 2 threads = 1 busca de 2 (o que a medição de 2 threads já indicava).
+* O modo reproduzível passa a 2 buscas × 3 threads (era 2 × 2). Os passos por modo continuam os mesmos; numa máquina
+  com menos de 6 threads ele demora mais.
+* Na mesma máquina, com 11 threads e 60 s, o jakobs2 passou do platô de 80,40 (83,09 com uma busca de 11 threads):
+  com mais threads por busca (e mais buscas), o platô some; nesta máquina de 2 threads ele não sumia nem com 300 s.

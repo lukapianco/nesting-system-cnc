@@ -12,7 +12,7 @@
     <div class="brand" title="Prumo — motor de nesting">
       <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4v16" /><path d="M16 20l-5 6h10z" class="fill" /></svg>
       <span class="brand-name">Prumo</span>
-      <span class="brand-version">5.7</span>
+      <span class="brand-version">5.8</span>
     </div>
     <div class="job-line" id="jobLine">Nenhum desenho carregado</div>
     <div class="topbar-actions">
@@ -132,6 +132,20 @@
             </select>
           </div>
           <button id="btnClearCustomSheet" class="btn btn-small btn-quiet hidden">Voltar para a chapa retangular</button>
+
+          <div class="stock">
+            <h3 class="sub-title">Estoque deste cálculo</h3>
+            <div class="field field-inline">
+              <label for="fullSheetsInput" id="fullSheetsLabel" title="Quantas chapas inteiras com as medidas acima podem ser usadas. O que não couber numa passa para a próxima.">Chapas inteiras com estas medidas</label>
+              <input type="number" id="fullSheetsInput" value="1" min="0" max="50" step="1" />
+            </div>
+            <div class="stock-head">
+              <span>Retalhos do estoque</span>
+              <button type="button" id="btnAddRemnant" class="link">adicionar retalho</button>
+            </div>
+            <div id="remnantList" class="remnant-list"></div>
+            <p class="note">Ordem de uso: a chapa desenhada, os retalhos do menor para o maior, as chapas inteiras. O que não couber numa passa para a próxima.</p>
+          </div>
         </div>
       </details>
 
@@ -285,6 +299,8 @@
         <div class="runline-track"><div id="progressBarFill" class="runline-fill"></div></div>
       </div>
 
+      <div id="sheetTabs" class="sheet-tabs hidden" role="tablist" aria-label="Chapas do cálculo"></div>
+
       <div class="table-frame">
         <canvas id="nestingCanvas" width="1200" height="720"></canvas>
         <div class="table-tools">
@@ -326,8 +342,26 @@
 
     <!-- ========== DIREITA: o que sai ========== -->
     <aside class="ledger" aria-label="Resultado">
+      <section class="block hidden" id="multiSummary">
+        <h2>Conjunto de chapas</h2>
+        <div class="block-body">
+          <div class="headline">
+            <strong class="big" id="multiUtil">—</strong>
+            <span class="big-label">das chapas usadas vira peça</span>
+          </div>
+          <dl class="facts">
+            <div><dt>Chapas usadas</dt><dd id="multiSheets">—</dd></div>
+            <div><dt>Retalhos do estoque usados</dt><dd id="multiRemnants">—</dd></div>
+            <div><dt>Peças cortadas</dt><dd id="multiPlaced">—</dd></div>
+            <div><dt>Faltaram</dt><dd id="multiUnplaced">—</dd></div>
+          </dl>
+          <p class="note" id="multiSkipped"></p>
+        </div>
+      </section>
+
       <section class="block">
-        <h2>Resultado</h2>
+        <h2 id="resultTitle">Resultado</h2>
+        <div class="block-body">
         <div class="headline">
           <strong class="big" id="kpiUtilization">—</strong>
           <span class="big-label">do material usado vira peça</span>
@@ -347,22 +381,28 @@
           <div><dt>Perfurações</dt><dd id="metricPierces">—</dd></div>
           <div><dt>Deslocamento / corte</dt><dd id="metricRapid">—</dd></div>
         </dl>
+        </div>
       </section>
 
       <section class="block">
         <h2>Exportar</h2>
+        <div class="block-body">
         <p class="note">O arquivo leva só o que a máquina corta. Marque o que mais quiser, cada item vai numa camada própria.</p>
         <label class="check"><input type="checkbox" id="exportIncludeSheet" /><span>Contorno da chapa</span></label>
         <label class="check"><input type="checkbox" id="exportIncludeRemnants" /><span>Retalhos</span></label>
         <label class="check"><input type="checkbox" id="exportIncludeLeadIn" /><span>Entradas de corte</span></label>
         <label class="check"><input type="checkbox" id="exportIncludeLabels" /><span>Nomes das peças</span></label>
         <button id="btnExportDxf" class="btn btn-primary btn-block">Baixar DXF de corte</button>
+        <button id="btnExportAllDxf" class="btn btn-block hidden" title="Um DXF de corte para cada chapa do conjunto.">Baixar DXF de todas as chapas</button>
         <button id="btnExportRemnantsDxf" class="btn btn-quiet btn-block" title="Cada retalho como contorno fechado com as medidas, para cadastrar no estoque.">Baixar DXF dos retalhos</button>
+        </div>
       </section>
 
       <section class="block block-server">
         <h2>Servidor</h2>
-        <div id="hwInfoBox" class="server">Consultando…</div>
+        <div class="block-body">
+          <div id="hwInfoBox" class="server">Consultando…</div>
+        </div>
       </section>
     </aside>
   </main>

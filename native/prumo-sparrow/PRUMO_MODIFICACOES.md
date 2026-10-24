@@ -42,6 +42,8 @@ Ele está aqui, inteiro. O resto do Prumo continua sob a licença do Prumo.
 | `src/util/assertions.rs` (V5.6) | a conferência de depuração soma perda de borda e de obstáculos |
 | `src/main.rs` (V5.7) | `--budget N`: orçamento em passos (consultas ao critério de parada, sempre na thread principal), 80% exploração e 20% compressão; o tempo vira teto; o `done` informa `steps` e `reproducible` |
 | `src/util/terminator.rs`, `src/optimizer/compress.rs` (V5.7) | método `budget_progress()` no `Terminator` (padrão `None`); com orçamento em passos, o tamanho do encolhimento da compressão segue a fração de passos usada em vez da fração de tempo. Sem `--budget`, idêntico ao original |
+| `src/main.rs` (V5.8) | `prumo_sheet.fixed: [{ring, offset}]`: peças já colocadas na chapa viram obstáculos fixos, cada uma inflada pelo seu offset (cálculo com várias chapas, ADR 009) |
+| `src/lib.rs`, `src/optimizer/lbf.rs` (V5.8) | `PRUMO_OBSTACLE_EXTENT`: a construção inicial pode alargar a faixa além do maior X dos obstáculos fixos (antes desistia: "could not construct an initial placement") |
 
 O algoritmo (construção LBF, exploração, compressão, separador com GLS, busca por amostragem e descida de
 coordenadas, função de perda por polos) **não foi alterado**. A única mudança de comportamento é da V5.6: no original,

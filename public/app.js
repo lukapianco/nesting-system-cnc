@@ -8,6 +8,7 @@ let startDebounce = null;
 let catalogParts = [];
 let partQuantities = {};
 let customSheetDxf = null;
+let multiResult = null, activeSheet = 0, sheetRunPrefix = ''; // cálculo com várias chapas (V5.8)
 let bestSolutionGlobal = null;
 let activeEventSource = null;
 let seedCounter = 1;
@@ -81,7 +82,7 @@ const btnStopKeepBest = document.getElementById('btnStopKeepBest');
 const QUALITY_MODES = {
   // external_budget: passos do otimizador no modo reproduzível (ADR 008). Medido na V5.7: uma busca de 2 threads num
   // Xeon 2,1 GHz faz ~18 passos/s, então os passos duram perto do tempo do modo numa máquina com 4 threads livres;
-  // com menos threads (o modo usa sempre 2 buscas × 2 threads) demora mais, numa CPU mais rápida termina antes
+  // com menos threads (o modo usa sempre 2 buscas × 3 threads desde a V5.8) demora mais, numa CPU mais rápida termina antes
   RASCUNHO: { iterations: 3000, evaluation_mode: 'FAST', external_time_s: 10, external_budget: 180 },
   PADRAO: { iterations: 15000, evaluation_mode: 'PRECISE', external_time_s: 30, external_budget: 540 },
   PRODUCAO: { iterations: 60000, evaluation_mode: 'PRECISE', external_time_s: 120, external_budget: 2160 }
@@ -346,6 +347,7 @@ function applyCatalogResponse(data, isNewFile) {
     sheetHeightInput.value = Math.round(customSheetDxf.height);
     sheetFileNameLabel.textContent = `Chapa do próprio desenho (${(customSheetDxf.obstacles || []).length} recortes)`;
     btnClearCustomSheet.classList.remove('hidden');
+    setDrawnSheetStock(true);
   } else if (customSheetDxf && customSheetDxf.fromDrawing) {
     clearCustomSheet(false);
   }
@@ -545,13 +547,25 @@ sheetDxfInput.addEventListener('change', async (e) => {
     sheetWidthInput.value = Math.round(customSheetDxf.width);
     sheetHeightInput.value = Math.round(customSheetDxf.height);
     btnClearCustomSheet.classList.remove('hidden');
+    setDrawnSheetStock(true);
     resetZoom();
     startBackendSseOptimization();
   }
 });
 
+// Estoque (V5.8): com chapa desenhada, chapas inteiras começam em 0 (a desenhada é a sobra que se quer gastar);
+// sem ela, 1 (a chapa da tela). A pessoa pode mudar o número depois.
+function setDrawnSheetStock(active) {
+  const input = document.getElementById('fullSheetsInput');
+  const label = document.getElementById('fullSheetsLabel');
+  if (!input) return;
+  input.value = active ? 0 : Math.max(1, Number(input.value) || 0);
+  label.textContent = active ? 'Chapas inteiras depois da desenhada (medidas acima)' : 'Chapas inteiras com estas medidas';
+}
+
 function clearCustomSheet(rerun = true) {
   customSheetDxf = null;
+  setDrawnSheetStock(false);
   sheetPresetSelect.value = 'rect';
   sheetFileNameLabel.textContent = 'Usar uma chapa desenhada (DXF)';
   btnClearCustomSheet.classList.add('hidden');
@@ -585,6 +599,7 @@ sheetPresetSelect.addEventListener('change', async () => {
     sheetWidthInput.value = Math.round(customSheetDxf.width);
     sheetHeightInput.value = Math.round(customSheetDxf.height);
     btnClearCustomSheet.classList.remove('hidden');
+    setDrawnSheetStock(true);
     resetZoom();
     startBackendSseOptimization();
   }
@@ -649,6 +664,12 @@ function resetRunUi() {
   candidatesList.innerHTML = '';
   candidatesBar.classList.add('hidden');
   bestSolutionGlobal = null;
+  multiResult = null;
+  sheetRunPrefix = '';
+  document.getElementById('sheetTabs').classList.add('hidden');
+  document.getElementById('multiSummary').classList.add('hidden');
+  document.getElementById('btnExportAllDxf').classList.add('hidden');
+  document.getElementById('resultTitle').textContent = 'Resultado';
   showCamMessage('');
   document.getElementById('unplacedAlert').classList.add('hidden');
   const { W: cw, H: ch } = fitCanvas();
@@ -700,6 +721,8 @@ async function startBackendSseOptimization() {
     engine: engineSelect.value,
     external_time_s: (QUALITY_MODES[qualityModeSelect.value] || {}).external_time_s || 30,
     reproducible: reproducibleInput.checked,
+    stock_full_sheets: Math.max(0, Math.floor(Number(document.getElementById('fullSheetsInput').value) || 0)),
+    stock_remnants: readRemnants(),
     external_budget: (QUALITY_MODES[qualityModeSelect.value] || QUALITY_MODES.PADRAO).external_budget,
     allow_rotation: allowRotationInput.checked,
     grain_restriction: grainRestrictionSelect.value,
@@ -758,15 +781,21 @@ async function startBackendSseOptimization() {
       return;
     }
 
+    if (msg.type === 'sheet-start') {
+      sheetRunPrefix = `Chapa ${msg.sheetIndex + 1} de ${msg.sheetCount} (${msg.sheetLabel}, ${msg.partsLeft} ${msg.partsLeft === 1 ? 'peça restante' : 'peças restantes'}): `;
+      progressStatusText.textContent = sheetRunPrefix + 'começando…';
+      return;
+    }
+
     if (msg.type === 'progress') {
       const pct = Math.round((msg.fraction ?? (msg.iter / msg.totalIterations)) * 100);
       progressBarFill.style.width = `${pct}%`;
       progressPercentText.textContent = `${pct}%`;
       if (msg.engine === 'SPARROW') {
-        progressStatusText.textContent = `Otimizador sparrow procurando, ${msg.improvements.toLocaleString('pt-BR')} ${msg.improvements === 1 ? 'plano melhor' : 'planos melhores'} até agora`;
+        progressStatusText.textContent = `${sheetRunPrefix}Otimizador sparrow procurando, ${msg.improvements.toLocaleString('pt-BR')} ${msg.improvements === 1 ? 'plano melhor' : 'planos melhores'} até agora`;
         progressStrategyText.textContent = 'Separa as peças sobrepostas e aperta o plano contra o início da chapa';
       } else {
-        progressStatusText.textContent = `Motor clássico, ${msg.iter.toLocaleString('pt-BR')} de ${msg.totalIterations.toLocaleString('pt-BR')} arranjos testados`;
+        progressStatusText.textContent = `${sheetRunPrefix}Motor clássico, ${msg.iter.toLocaleString('pt-BR')} de ${msg.totalIterations.toLocaleString('pt-BR')} arranjos testados`;
         progressStrategyText.textContent = `${msg.calcPerSec.toLocaleString('pt-BR')} arranjos por segundo`;
       }
 
@@ -787,6 +816,8 @@ async function startBackendSseOptimization() {
 
       bestSolutionGlobal = msg.bestResult;
       currentArchive = msg.topArchive || [];
+      sheetRunPrefix = '';
+      if (msg.multi) { finishMulti(msg, expandedCount); return; }
       progressBarFill.style.width = '100%';
       progressPercentText.textContent = '100%';
       const secs = (msg.totalTimeMs / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 });
@@ -1057,6 +1088,8 @@ function drawSheetNesting(nesting, isHighlight = false) {
       ring(hole.placedPoints, part.x, part.y);
       if (hole.hasChildPartInside) {
         // furo útil que recebeu peça: continua amarelo (contorno forte + fundo claro); a filha verde vem por cima
+        ctx.fillStyle = C.chapa; // o furo é vazio: primeiro a cor da mesa, depois o amarelo claro por cima
+        ctx.fill();
         ctx.fillStyle = C.furoOcupado;
         ctx.fill();
         ctx.strokeStyle = C.furo; ctx.lineWidth = 2;
@@ -1151,7 +1184,7 @@ const fmtPct = (v) => `${Number(v || 0).toLocaleString('pt-BR', { minimumFractio
 const fmtArea = (mm2) => `${(mm2 / 1e6).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 })} m²`;
 const dimTxt = (d) => String(d || '').replace(/(\d+)x(\d+)mm/, '$1 × $2 mm');
 
-function updateMetrics(totalExpandedCount, nesting) {
+function updateMetrics(totalExpandedCount, nesting, opts = {}) {
   document.getElementById('kpiUtilization').textContent = fmtPct(nesting.compactUtilization);
   document.getElementById('kpiRawRatio').textContent = 'conta o que sobra como retalho de estoque como material não usado';
   document.getElementById('metricNetUtil').textContent = fmtPct(nesting.rawUtilization);
@@ -1160,8 +1193,8 @@ function updateMetrics(totalExpandedCount, nesting) {
   document.getElementById('metricUsedArea').textContent = fmtArea(nesting.usedArea);
   const all = nesting.placedParts.length === totalExpandedCount;
   const placedEl = document.getElementById('metricPlacedCount');
-  placedEl.textContent = `${nesting.placedParts.length} de ${totalExpandedCount}`;
-  placedEl.className = all ? '' : 'bad';
+  placedEl.textContent = opts.multi ? `${nesting.placedParts.length} nesta chapa` : `${nesting.placedParts.length} de ${totalExpandedCount}`;
+  placedEl.className = all || opts.multi ? '' : 'bad';
   document.getElementById('metricNominalGap').textContent = `${nesting.kerf} mm`;
   document.getElementById('metricNominalGap').title = `ponte ${nesting.part_clearance} mm + kerf ${nesting.kerf_width} mm`;
   document.getElementById('metricRemnantArea').textContent = nesting.remnants.length
@@ -1202,13 +1235,132 @@ function updateMetrics(totalExpandedCount, nesting) {
   showCamMessage(notes.join(' | '));
 
   const alertBox = document.getElementById('unplacedAlert');
-  if (nesting.unplacedParts && nesting.unplacedParts.length > 0) {
+  if (opts.multi) {
+    alertBox.classList.add('hidden'); // no conjunto, o que não coube numa chapa foi para a próxima (ver "Faltaram")
+  } else if (nesting.unplacedParts && nesting.unplacedParts.length > 0) {
     alertBox.classList.remove('hidden');
-    alertBox.textContent = `${nesting.unplacedParts.length} ${nesting.unplacedParts.length === 1 ? 'peça não coube' : 'peças não couberam'} nesta chapa. Aumente a chapa ou reduza o lote.`;
+    alertBox.textContent = `${nesting.unplacedParts.length} ${nesting.unplacedParts.length === 1 ? 'peça não coube' : 'peças não couberam'} nesta chapa. Aumente a chapa, reduza o lote ou informe mais chapas e retalhos no estoque (passo 2).`;
   } else {
     alertBox.classList.add('hidden');
   }
 }
+
+// ---------- várias chapas e retalhos (V5.8, ADR 009) ----------
+const remnantListEl = document.getElementById('remnantList');
+function readRemnants() {
+  return [...remnantListEl.querySelectorAll('.remnant-row')].map(r => ({
+    width: Number(r.querySelector('[data-k="w"]').value), height: Number(r.querySelector('[data-k="h"]').value),
+    quantity: Math.max(1, Math.floor(Number(r.querySelector('[data-k="q"]').value) || 1))
+  })).filter(r => r.width >= 20 && r.height >= 20);
+}
+function renderRemnantEmpty() {
+  if (!remnantListEl.querySelector('.remnant-row')) remnantListEl.innerHTML = '<span class="remnant-empty">Nenhum. Retalhos entram antes das chapas inteiras.</span>';
+}
+function addRemnantRow(w = 600, h = 400, q = 1) {
+  const empty = remnantListEl.querySelector('.remnant-empty');
+  if (empty) empty.remove();
+  const row = document.createElement('div');
+  row.className = 'remnant-row';
+  row.innerHTML = `<input type="number" data-k="w" min="20" step="10" value="${w}" aria-label="Comprimento do retalho (mm)" />` +
+    `<span class="x">×</span><input type="number" data-k="h" min="20" step="10" value="${h}" aria-label="Largura do retalho (mm)" />` +
+    `<span class="x">qtd</span><input type="number" data-k="q" min="1" max="50" step="1" value="${q}" aria-label="Quantidade" />` +
+    `<button type="button" class="del" title="Tirar este retalho" aria-label="Tirar este retalho">×</button>`;
+  row.querySelectorAll('input').forEach(i => i.addEventListener('change', () => { if (currentUploadId) scheduleOptimization(500); }));
+  row.querySelector('.del').addEventListener('click', () => { row.remove(); renderRemnantEmpty(); if (currentUploadId) scheduleOptimization(300); });
+  remnantListEl.appendChild(row);
+}
+document.getElementById('btnAddRemnant').addEventListener('click', () => { addRemnantRow(); if (currentUploadId) scheduleOptimization(500); });
+document.getElementById('fullSheetsInput').addEventListener('change', () => { if (currentUploadId) scheduleOptimization(500); });
+renderRemnantEmpty();
+
+const KIND_TXT = { desenhada: 'chapa desenhada', retalho: 'retalho', chapa: 'chapa inteira' };
+function finishMulti(msg, expandedCount) {
+  multiResult = msg;
+  const sm = msg.summary || {};
+  progressBarFill.style.width = '100%';
+  progressPercentText.textContent = '100%';
+  const secs = (msg.totalTimeMs / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+  progressStatusText.textContent = `Pronto em ${secs} s: ${sm.sheetsUsed} ${sm.sheetsUsed === 1 ? 'chapa' : 'chapas'}` +
+    `${sm.remnantsUsed ? ` (${sm.remnantsUsed} ${sm.remnantsUsed === 1 ? 'retalho' : 'retalhos'} do estoque)` : ''}, ${fmtPct(sm.utilization)} de aproveitamento no conjunto` +
+    `${msg.stoppedByUser ? ', parado pelo usuário' : ''}`;
+  progressStrategyText.textContent = sm.unplaced
+    ? `Faltaram ${sm.unplaced} ${sm.unplaced === 1 ? 'peça' : 'peças'}: o estoque informado acabou. Cada chapa foi conferida pelo validador independente.`
+    : 'Todas as peças cortadas. Cada chapa foi conferida pelo validador independente.';
+  progressBestText.textContent = '';
+
+  document.getElementById('multiSummary').classList.remove('hidden');
+  document.getElementById('multiUtil').textContent = fmtPct(sm.utilization);
+  document.getElementById('multiSheets').textContent = `${sm.sheetsUsed} de ${(msg.stock || []).length}`;
+  document.getElementById('multiRemnants').textContent = String(sm.remnantsUsed || 0);
+  document.getElementById('multiPlaced').textContent = `${sm.placed} de ${sm.totalParts}`;
+  const un = document.getElementById('multiUnplaced');
+  un.textContent = sm.unplaced ? `${sm.unplaced} ${sm.unplaced === 1 ? 'peça' : 'peças'}` : 'nenhuma';
+  un.className = sm.unplaced ? 'bad' : 'ok';
+  document.getElementById('multiSkipped').textContent = (msg.skipped || []).length
+    ? 'Não usadas: ' + msg.skipped.map(k => `${k.label} (${k.why})`).join('; ') + '.' : '';
+  document.getElementById('btnExportAllDxf').classList.toggle('hidden', msg.sheets.length < 2);
+
+  const tabs = document.getElementById('sheetTabs');
+  tabs.innerHTML = '';
+  msg.sheets.forEach((sh, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = `sheet-tab kind-${sh.kind}`;
+    b.setAttribute('role', 'tab');
+    b.innerHTML = `<b>${i + 1}. ${esc(KIND_TXT[sh.kind] || sh.kind)}</b><small>${Math.round(sh.width)} × ${Math.round(sh.height)}, ${sh.bestResult.placedParts.length} peças, ${fmtPct(sh.bestResult.rawUtilization)} da chapa</small>`;
+    b.onclick = () => selectSheet(i, expandedCount);
+    tabs.appendChild(b);
+  });
+  tabs.classList.remove('hidden');
+  btnExportDxf.disabled = false;
+  selectSheet(0, expandedCount);
+}
+
+function selectSheet(i, expandedCount) {
+  if (!multiResult) return;
+  activeSheet = i;
+  const sh = multiResult.sheets[i];
+  [...document.querySelectorAll('#sheetTabs .sheet-tab')].forEach((t, k) => t.setAttribute('aria-selected', k === i ? 'true' : 'false'));
+  document.getElementById('resultTitle').textContent = `Chapa ${i + 1}: ${sh.label}`;
+  bestSolutionGlobal = sh.bestResult;
+  currentArchive = sh.topArchive || [];
+  resetZoom();
+  drawSheetNesting(bestSolutionGlobal, false);
+  updateMetrics(expandedCount, bestSolutionGlobal, { multi: true });
+  renderArchiveButtons(currentArchive, bestSolutionGlobal, expandedCount);
+}
+
+async function downloadLayoutDxf(layout, fileName) {
+  const r = await fetch('/api/export-dxf', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ layout, options: currentExportOptions() })
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    const detail = err.validation ? ' ' + err.validation.errors.slice(0, 3).map(e => e.msg).join(' | ') : '';
+    showCamMessage(`Exportação bloqueada (${fileName}): ${err.error || `HTTP ${r.status}`}${detail}`);
+    return false;
+  }
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = fileName;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  return true;
+}
+document.getElementById('btnExportAllDxf').addEventListener('click', async (ev) => {
+  if (!multiResult) return;
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    for (let i = 0; i < multiResult.sheets.length; i++) {
+      const sh = multiResult.sheets[i];
+      await downloadLayoutDxf(sh.bestResult, `chapa${i + 1}_${sh.kind}_${Math.round(sh.width)}x${Math.round(sh.height)}.dxf`);
+      await new Promise(r => setTimeout(r, 350)); // o navegador bloqueia downloads seguidos rápidos demais
+    }
+  } finally { btn.disabled = false; }
+});
 
 function renderArchiveButtons(archive, active, totalExpandedCount) {
   if (archive.length <= 1) {
@@ -1221,13 +1373,15 @@ function renderArchiveButtons(archive, active, totalExpandedCount) {
     const b = document.createElement('button');
     b.className = `candidate-chip ${sol === active ? 'active' : ''}`;
     const bad = sol.validation && !sol.validation.ok ? ' (reprovado)' : '';
-    b.textContent = `${i + 1}: ${fmtPct(sol.compactUtilization)}, retalho ${dimTxt(sol.largestRemnantDim)}${bad}`;
+    const rem = sol.largestRemnantArea > 0 && sol.largestRemnantDim ? `retalho ${dimTxt(sol.largestRemnantDim)}` : 'sem retalho';
+    b.textContent = `${i + 1}: ${fmtPct(sol.compactUtilization)}, ${rem}${bad}`;
     b.title = sol.engine === 'SPARROW' ? 'plano do otimizador sparrow' : 'plano do motor clássico';
     b.onclick = () => {
       bestSolutionGlobal = sol;
       drawSheetNesting(sol, false);
-      updateMetrics(totalExpandedCount, sol);
+      updateMetrics(totalExpandedCount, sol, { multi: !!multiResult });
       renderArchiveButtons(archive, sol, totalExpandedCount);
+      if (multiResult) multiResult.sheets[activeSheet].bestResult = sol; // a escolha vale para esta chapa (exportar todas)
     };
     candidatesList.appendChild(b);
   });

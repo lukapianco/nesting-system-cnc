@@ -91,7 +91,8 @@ impl LBFBuilder {
             // Retain the existing heuristic ceiling, without treating it as infeasibility.
             let width_limit = 2.0 * self.instance.items.iter()
                 .map(|(item, qty)| item.shape_cd().diameter() * *qty as f32)
-                .sum::<f32>();
+                .sum::<f32>()
+                + crate::PRUMO_OBSTACLE_EXTENT.get().copied().unwrap_or(0.0); // Prumo: obstáculos fixos no começo da faixa
             if next_width >= width_limit {
                 let external_id = self.instance.item(item_idx).external_id();
                 return Err(ConstructionError { external_id }.into());

@@ -205,12 +205,22 @@ fn build_sheet_obstacles(path: &Path, sur: jagua_rs::geometry::fail_fast::SPSurr
     for p in &outer { x0 = x0.min(p.x); y0 = y0.min(p.y); x1 = x1.max(p.x); y1 = y1.max(p.y); }
     let bbox: PathD = vec![Point::new(x0, y0), Point::new(x1, y0), Point::new(x1, y1), Point::new(x0, y1)];
     // área fora do contorno, dentro da caixa da chapa: peças simples (o contorno toca os 4 lados da caixa)
-    let mut regions: PathsD = difference_d(&vec![bbox], &vec![outer], FillRule::NonZero, 4).into_iter().filter(|r| area(r).abs() > 1e-6).collect();
-    regions.extend(holes.into_iter());
+    let mut regions: Vec<(PathD, f64)> = difference_d(&vec![bbox], &vec![outer], FillRule::NonZero, 4).into_iter()
+        .filter(|r| area(r).abs() > 1e-6).map(|r| (r, off)).collect();
+    regions.extend(holes.into_iter().map(|h| (h, off)));
+    // V5.7/V5.8: peças já colocadas nesta chapa (reabastecimento chapa a chapa, ADR 009): contorno nominal em
+    // coordenadas da chapa, cada uma com o seu offset (o Prumo manda g, então peça nova e fixa ficam a ≥ 2g ≥ folga)
+    if let Some(fx) = sh.get("fixed").and_then(|f| f.as_array()) {
+        for f in fx {
+            let r = ring(f.get("ring").context("prumo_sheet.fixed[].ring ausente")?)?;
+            let o = f.get("offset").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            if r.len() >= 3 { regions.push((r, o)); }
+        }
+    }
     // orientação positiva em todos: um anel horário seria tratado como furo pelo offset (encolheria e sumiria)
-    for r in regions.iter_mut() { if area(r) < 0.0 { r.reverse(); } }
+    for (r, _) in regions.iter_mut() { if area(r) < 0.0 { r.reverse(); } }
     let mut shapes = Vec::new();
-    for r in regions {
+    for (r, off) in regions {
         let grown: PathsD = if off != 0.0 { inflate_paths_d(&vec![r], off, JoinType::Round, EndType::Polygon, 2.0, 4, 0.002) } else { vec![r] };
         for g in grown {
             if area(&g) <= 1e-6 { continue; } // positivo = contorno externo (o offset não cria furos aqui)
@@ -226,6 +236,8 @@ fn build_sheet_obstacles(path: &Path, sur: jagua_rs::geometry::fail_fast::SPSurr
     }
     if shapes.is_empty() { return Ok(Some(0)); }
     let n = shapes.len();
+    let extent = shapes.iter().map(|s| s.shape.bbox().x_max).fold(0.0f32, f32::max);
+    let _ = sparrow::PRUMO_OBSTACLE_EXTENT.set(extent);
     let zone = InferiorQualityZone::new(0, shapes, sur)?;
     jagua_rs::probs::spp::entities::PRUMO_STRIP_OBSTACLES.set(zone).map_err(|_| anyhow::anyhow!("obstáculos já definidos"))?;
     Ok(Some(n))

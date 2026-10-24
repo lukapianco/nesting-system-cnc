@@ -2,7 +2,7 @@
 
 > *Prumo* é o nome do motor de nesting (antes "Motor Industrial de True Shape 2D Nesting", V5.x). A API e os arquivos não mudaram de nome.
 
-**Versão do sistema:** 5.7 · **Público:** (A) operador / programador de corte · (B) profissional que faz a implantação na empresa cliente
+**Versão do sistema:** 5.8 · **Público:** (A) operador / programador de corte · (B) profissional que faz a implantação na empresa cliente
 
 > **Como ler este manual.** Quem só vai operar o sistema lê os capítulos 1 a 8 e usa o 12 (problemas) como consulta.
 > Quem vai implantar na empresa lê tudo, principalmente o capítulo 13 (roteiro de implantação).
@@ -62,7 +62,7 @@ O sistema recebe um arquivo **.DXF com as peças** (e, opcionalmente, outro **.D
 A coluna da esquerda tem os quatro passos numerados (**1 Peças, 2 Chapa, 3 Corte, 4 Busca**). Cada passo fechado mostra um resumo do que está escolhido; clique para abrir.
 
 1. **Peças:** arraste o .DXF para a área tracejada (ou clique em **Abrir**, ou escolha um **Exemplo**) e **leia o diagnóstico** (3.4): o que foi lido, ignorado, corrigido ou detectado (moldura, chapa usada, cópias, unidade). Confira as quantidades: cópias idênticas no desenho já chegam somadas (ex.: 87 gomos desenhados = 1 peça × 87). Os atalhos *todas 1*, *×2*, *×5*, *×10* e *encher a chapa* ajudam.
-2. **Chapa:** comprimento × largura, ou **Usar uma chapa desenhada (DXF)** quando o estoque for irregular (sobra, chapa com furo/defeito). Se a chapa usada vier desenhada **junto** com as peças, o diagnóstico oferece usá-la (3.2).
+2. **Chapa:** comprimento × largura, ou **Usar uma chapa desenhada (DXF)** quando o estoque for irregular (sobra, chapa com furo/defeito). Se a chapa usada vier desenhada **junto** com as peças, o diagnóstico oferece usá-la (3.2). Em **Estoque deste cálculo**, diga quantas chapas inteiras podem ser usadas e quais retalhos do estoque entram antes delas (3.5).
 3. **Corte:** escolha o processo e a espessura e clique em **Preencher com valores de partida**. Ajuste só o que a sua máquina exigir.
 4. **Busca:** o **Tempo de busca** — *Rascunho* para conferir a ideia, *Padrão* para o dia a dia, *Produção* para o layout que vai ser cortado.
 5. **O cálculo começa sozinho** quando há peças e chapa, e recomeça sempre que você muda alguma coisa (o cálculo anterior é parado na hora, no servidor também). Acompanhe a barra acima da mesa. Pode comparar as alternativas (botões abaixo da mesa). Para encerrar antes do fim e ficar com o melhor layout até ali, use **Parar e manter o melhor** no alto da tela; **Calcular de novo** roda outra vez com outra semente.
@@ -126,6 +126,21 @@ moldura da chapa e peças em blocos/matrizes — e diz no **Diagnóstico** tudo 
 | Faixa **"parece uma chapa já usada"** (V5.6) | Contorno com recortes que pode ser a chapa; botões **Usar como chapa** e **Desfazer** (3.2). |
 | Lista de itens | Erro (vermelho), Alerta (laranja), Aviso, Nota, com as **coordenadas do desenho** de aberturas, linhas soltas e cruzamentos. |
 | **Opções de leitura** | Unidade, moldura (detectar/peça), tolerância de costura, fechar aberturas até X mm, cópias → quantidade, incluir tracejadas, incluir layers ocultas e **lista de layers** (desmarque para excluir). Qualquer mudança reanalisa sem reenviar o arquivo. |
+
+### 3.5 Estoque do cálculo: várias chapas e retalhos (V5.8)
+
+No passo **2 Chapa**, o bloco **Estoque deste cálculo** diz ao Prumo com o que ele pode contar:
+
+* **Chapas inteiras com estas medidas:** quantas chapas do tamanho informado acima podem ser usadas (padrão 1; com uma chapa desenhada, o padrão vira 0, porque a ideia é gastar a sobra).
+* **Retalhos do estoque:** **adicionar retalho** cria uma linha com comprimento × largura e quantidade. O × tira a linha.
+
+O cálculo vai **chapa a chapa**, nesta ordem: a chapa desenhada (se houver), os retalhos do menor para o maior e as chapas inteiras. Cada chapa recebe só as peças que ainda faltam; o que não couber passa para a próxima. Um retalho em que nenhuma peça que falta cabe é pulado sem calcular. Cada chapa leva o tempo do modo de busca (Rascunho 10 s, Padrão 30 s, Produção 2 min).
+
+Quando uma chapa não comporta tudo o que falta, o Automático faz assim: o motor clássico escolhe quais peças vão nela (metade do tempo), o otimizador sparrow reencaixa essas peças mais apertadas e tenta pôr outras nos vãos e na ponta que sobrou; fica o plano que aproveitar mais aquela chapa (ADR 009).
+
+O resultado aparece com **abas**, uma por chapa usada, acima da mesa (retalhos com a borda lilás, chapa desenhada com a borda laranja). A coluna da direita ganha o bloco **Conjunto de chapas**: aproveitamento do conjunto (área das peças ÷ área das chapas usadas), chapas e retalhos usados, peças cortadas e as que **faltaram** (se o estoque acabou). **Baixar DXF de corte** baixa a chapa da aba aberta; **Baixar DXF de todas as chapas** baixa um arquivo por chapa (`chapa1_retalho_600x400.dxf`, `chapa2_chapa_1200x800.dxf`…).
+
+Pela API, o mesmo vem em `config.stock_full_sheets` e `config.stock_remnants` (`[{width, height, quantity, ref}]`, `ref` = o código do retalho no seu sistema, que volta na resposta).
 
 ---
 
@@ -241,7 +256,7 @@ Convenção: **[Padrão]** é o valor inicial da tela. "Aumenta/diminui" descrev
 | **Limite (s)** | `0` = sem limite. Ao atingir, encerra **e mantém o melhor layout até ali** (exibe "limite de tempo atingido"). |
 | **Parar e manter o melhor** (botão no alto da tela) | Encerra a busca **ao fim da avaliação em curso** e entrega o melhor layout já validado e exportável. Útil com peças curvas/complexas, em que cada avaliação pode levar de décimos de segundo a alguns segundos. |
 | **Semente** (V5.7: campo no passo 4) | Ponto de partida da busca; **Calcular de novo** soma 1, e dá para digitar uma. No motor clássico, mesma semente + mesma entrada = mesmo resultado. No sparrow, com o orçamento por tempo, o resultado pode variar entre execuções e máquinas (sempre validado); para repetir um plano, ligue **Resultado reproduzível**. |
-| **Resultado reproduzível** (V5.7) | O otimizador sparrow para por **número de passos** em vez de tempo e divide as threads sempre do mesmo jeito (2 buscas × 2 threads). Mesmo desenho, mesmos parâmetros e mesma semente dão o mesmo plano em qualquer servidor. Passos: Rascunho 180, Padrão 540, Produção 2.160. O tempo varia com a máquina (numa com menos de 4 threads, demora mais); se passar do teto (8 × o tempo do modo, ou o *Limite (s)*), o plano sai e a tela avisa que ele pode não se repetir. |
+| **Resultado reproduzível** (V5.7) | O otimizador sparrow para por **número de passos** em vez de tempo e divide as threads sempre do mesmo jeito (2 buscas × 3 threads desde a V5.8; na V5.7, 2 × 2). Mesmo desenho, mesmos parâmetros e mesma semente dão o mesmo plano em qualquer servidor. Passos: Rascunho 180, Padrão 540, Produção 2.160. O tempo varia com a máquina (numa com menos de 6 threads, demora mais); se passar do teto (8 × o tempo do modo, ou o *Limite (s)*), o plano sai e a tela avisa que ele pode não se repetir. |
 | **Buscas em paralelo** (V5.7, automático) | O sparrow usa as threads da máquina (divididas entre os cálculos que estão rodando) em várias buscas ao mesmo tempo, cada uma com a sua semente, e fica com a melhor. A barra de progresso mostra quantas foram. Servidor compartilhado: `PRUMO_THREADS_PER_JOB` fixa as threads por cálculo. |
 
 ### 5.10 Corte de Linha Comum (CLC) — desativado (V5.4)
@@ -562,7 +577,7 @@ Seja franco com o cliente sobre isto:
 
 | Limitação | Impacto | Previsão |
 |---|---|---|
-| **Uma única chapa** por execução | Lotes maiores que uma chapa precisam ser divididos manualmente. | Evolução prioritária (multi-chapa + estoque). |
+| Várias chapas são calculadas **uma de cada vez** (V5.8) | A escolha das peças de cada chapa não olha as chapas seguintes; em casos raros, trocar peças entre chapas daria uma chapa a menos. | Otimização do conjunto (plano, fase 3). |
 | **Uma peça filha por furo** | Furo grande pode receber mais peças, mas hoje recebe uma. | Evolução. |
 | **CLC não funde arestas** | Não use em produção. | Evolução. |
 | Entrada DXF: sem DXF binário, `REGION`/`3DSOLID`, XREF, hachura como contorno | Relatado no Diagnóstico; exige EXPLODE/BIND/ASCII no CAD. | Evolução. |

@@ -13,6 +13,10 @@ pub mod config;
 pub mod eval;
 pub mod consts;
 
+/// Prumo (V5.8): maior X ocupado por obstáculos fixos da faixa (chapa desenhada, peças já colocadas). A construção
+/// inicial (LBF) precisa poder alargar a faixa além deles, senão desiste antes de achar espaço livre.
+pub static PRUMO_OBSTACLE_EXTENT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+
 pub static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 /// Prumo: substitui o formatador do crate numfmt (so usado em mensagens de log).

@@ -1,3 +1,55 @@
+# V5.8 — várias chapas e retalhos no mesmo cálculo, threads pela medição de 12 threads, painel direito no novo estilo
+
+## Várias chapas e retalhos no mesmo cálculo — ADR 009 (fase 3, item obrigatório da v6)
+* **Estoque na entrada:** chapas inteiras (quantas) e retalhos retangulares do estoque (`stock_full_sheets`,
+  `stock_remnants: [{width, height, quantity, ref}]`). A chapa desenhada entra também.
+* **Ordem:** chapa desenhada → retalhos do menor para o maior → chapas inteiras. Retalho em que nenhuma peça que falta
+  cabe é pulado sem calcular. Cada chapa é um cálculo comum, validado, só com as peças que faltam; o que não coube passa
+  para a próxima; se o estoque acabar, a resposta diz o que faltou.
+* **Chapa que não comporta tudo (Automático):** o motor clássico escolhe quais peças vão nela (metade do tempo), o
+  sparrow reencaixa essas peças mais apertadas e tenta pôr outras nos vãos e na ponta; fica o que aproveitar mais.
+  Medido antes de decidir: só as rodadas do sparrow perdiam do clássico em 2 de 3 casos (ADR 009).
+* **Executável:** peças já colocadas viram obstáculos fixos (`prumo_sheet.fixed`), e a construção inicial passou a
+  alargar a faixa além deles (antes desistia: "could not construct an initial placement").
+* **Medido (`bench/multichapa.js`, 20 s por chapa, 2 threads):**
+
+  | Lote | Clássico | Automático |
+  |---|---|---|
+  | trueshape × 10 (60 peças, 1200 × 800) | 4 chapas, última com 1.178 mm usados | 4 chapas, última com 1.059 mm |
+  | industrial × 6 (36 peças, 1200 × 800) | 4 chapas, última com 346 mm | 4 chapas, última com 226 mm |
+  | Modelo 1 × 3 (66 peças, 2000 × 1200) | 4 chapas, 42,15% | **3 chapas, 56,21%** |
+  | Modelo 2 × 3 (261 gomos, 3000 × 1200) | 3 chapas, última com 2.807 mm | 3 chapas, última com 2.742 mm |
+
+  Todas as chapas válidas, nenhuma peça faltando. No Modelo 1 × 3 o Automático usou uma chapa a menos; nos outros, o
+  mesmo número de chapas, com a última mais curta (sobra maior no fim). O maior retalho retangular da última chapa foi
+  maior em 2 casos e menor em 1 (Modelo 2: 0,291 contra 0,343 m²).
+* **Na tela:** passo 2 com "Estoque deste cálculo" (chapas inteiras e "adicionar retalho"); abas por chapa acima da
+  mesa (retalho com borda lilás, chapa desenhada com borda laranja); bloco "Conjunto de chapas" à direita; "Baixar DXF
+  de todas as chapas" (um arquivo por chapa). Com uma chapa só, tudo fica como antes.
+
+## Divisão das threads pela medição com 12 threads (ADR 008, revisão)
+* O arquivo do usuário (i5-12400, 11 threads, 60 s, 3 sementes) mostrou buscas de 3 threads na frente: 3 × 3 com
+  79,14% de média; 5 × 2 78,75; 2 × 4 78,69; 1 × 11 78,62; 11 × 1 77,53. A política automática passou a buscas de 3
+  threads (12 threads = 4 buscas de 3). O modo reproduzível passou a 2 buscas × 3 threads.
+* Na máquina do usuário, o jakobs2 passou do platô de 80,40% (83,09% com 11 threads numa busca).
+
+## Painel direito no estilo do trilho (pedido do usuário)
+* Cada bloco com cabeçalho de fundo próprio e corpo branco, rótulos em cor de texto, números em negrito, linhas mais
+  firmes, medidores do servidor com fundo mais escuro.
+
+## Mesa
+* Furo útil com peça dentro: o fundo agora é a cor da mesa com o amarelo-claro por cima (antes o amarelo transparente
+  ficava sobre o azul da peça e virava verde-água).
+* "Outros planos" dizia "retalho 0 × 0 mm" quando não havia retalho; agora diz "sem retalho".
+
+## Testes
+* `test/multi_sheet.js` (novo, 7 sem o executável e 8 com ele): ordem do estoque, pulo de chapa inútil, limpeza da
+  entrada, cálculo pela API com retalho + chapas (retalho primeiro, cada chapa válida, nenhuma peça repetida ou
+  perdida), estoque que acaba, Automático com o sparrow.
+* `test/engine_sparrow.js`: 18 (o teste "lote maior que a chapa → clássico" virou dois: Automático nunca abaixo do
+  plano do clássico que ele mesmo calcula, e SPARROW forçado com as rodadas).
+* `test/ui_e2e.js`: 17 (novo: estoque com retalho e 3 chapas, abas, conjunto, exportar todas).
+
 # V5.7 — várias buscas em paralelo, resultado reproduzível, cores dos furos, trilho mais legível
 
 ## Várias buscas em paralelo no otimizador sparrow — ADR 008 (fase 3)

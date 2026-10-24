@@ -143,7 +143,15 @@ function normalizeNestingParams(rawConfig = {}) {
     reproducible: rawConfig.reproducible === true || rawConfig.reproducible === 'true',
     external_budget: Math.min(200000, Math.max(20, Math.floor(Number(rawConfig.external_budget ?? 540)))),
     // buscas independentes ao mesmo tempo (sementes diferentes); 0 = automático pelas threads do job
-    parallel_searches: Math.min(64, Math.max(0, Math.floor(Number(rawConfig.parallel_searches ?? 0))))
+    parallel_searches: Math.min(64, Math.max(0, Math.floor(Number(rawConfig.parallel_searches ?? 0)))),
+    // V5.8 (ADR 009): estoque do cálculo. Chapas inteiras do tamanho da tela (0 a 50; sem estoque nenhum vale 1) e
+    // retalhos retangulares [{width, height, quantity, ref?}] (ref = código do retalho no sistema de gestão)
+    stock_full_sheets: Math.min(50, Math.max(0, Math.floor(Number(rawConfig.stock_full_sheets ?? 1)))),
+    stock_remnants: (Array.isArray(rawConfig.stock_remnants) ? rawConfig.stock_remnants : [])
+      .map(r => ({ width: Number(r && r.width), height: Number(r && r.height), quantity: Math.floor(Number((r && r.quantity) ?? 1)), ref: r && r.ref != null ? String(r.ref).slice(0, 80) : null }))
+      .filter(r => r.width >= 20 && r.height >= 20 && r.width <= 20000 && r.height <= 20000 && r.quantity >= 1)
+      .map(r => ({ ...r, quantity: Math.min(50, r.quantity) }))
+      .slice(0, 50)
   };
 }
 

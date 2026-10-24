@@ -1,0 +1,112 @@
+{
+ "versao": "5.8.0",
+ "data": "2026-10-24T23:11:21.707Z",
+ "tempo_por_chapa_s": 20,
+ "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+ "linhas": [
+  {
+   "caso": "trueshape10",
+   "motor": "CLASSICO",
+   "pecas": 60,
+   "chapas": 4,
+   "aproveitamento": 70.83,
+   "faltaram": 0,
+   "ultima_chapa_maior_retalho_m2": 0.095,
+   "ultima_chapa_comprimento_mm": 1178.2,
+   "motores_por_chapa": "CCCC",
+   "validas": true,
+   "segundos": 80.5
+  },
+  {
+   "caso": "trueshape10",
+   "motor": "AUTO",
+   "pecas": 60,
+   "chapas": 4,
+   "aproveitamento": 70.83,
+   "faltaram": 0,
+   "ultima_chapa_maior_retalho_m2": 0.102,
+   "ultima_chapa_comprimento_mm": 1058.5,
+   "motores_por_chapa": "SCCS",
+   "validas": true,
+   "segundos": 76.1
+  },
+  {
+   "caso": "industrial6",
+   "motor": "CLASSICO",
+   "pecas": 36,
+   "chapas": 4,
+   "aproveitamento": 59.71,
+   "faltaram": 0,
+   "ultima_chapa_maior_retalho_m2": 0.663,
+   "ultima_chapa_comprimento_mm": 346.2,
+   "motores_por_chapa": "CCCC",
+   "validas": true,
+   "segundos": 80.2
+  },
+  {
+   "caso": "industrial6",
+   "motor": "AUTO",
+   "pecas": 36,
+   "chapas": 4,
+   "aproveitamento": 59.71,
+   "faltaram": 0,
+   "ultima_chapa_maior_retalho_m2": 0.757,
+   "ultima_chapa_comprimento_mm": 226.3,
+   "motores_por_chapa": "CCCS",
+   "validas": true,
+   "segundos": 75.5
+  },
+  {
+   "caso": "modelo1x3",
+   "motor": "CLASSICO",
+   "pecas": 66,
+   "chapas": 4,
+   "aproveitamento": 42.15,
+   "faltaram": 0,
+   "ultima_chapa_maior_retalho_m2": 1.415,
+   "ultima_chapa_comprimento_mm": 795.9,
+   "motores_por_chapa": "CCCC",
+   "validas": true,
+   "segundos": 81.7
+  },
+  {
+   "caso": "modelo1x3",
+   "motor": "AUTO",
+   "pecas": 66,
+   "chapas": 3,
+   "aproveitamento": 56.21,
+   "faltaram": 0,
+   "ultima_chapa_maior_retalho_m2": 0.624,
+   "ultima_chapa_comprimento_mm": 1462.2,
+   "motores_por_chapa": "SSS",
+   "validas": true,
+   "segundos": 72.3
+  },
+  {
+   "caso": "modelo2x3",
+   "motor": "CLASSICO",
+   "pecas": 261,
+   "chapas": 3,
+   "aproveitamento": 69.51,
+   "faltaram": 0,
+   "ultima_chapa_maior_retalho_m2": 0.343,
+   "ultima_chapa_comprimento_mm": 2807.1,
+   "motores_por_chapa": "CCC",
+   "validas": true,
+   "segundos": 67.4
+  },
+  {
+   "caso": "modelo2x3",
+   "motor": "AUTO",
+   "pecas": 261,
+   "chapas": 3,
+   "aproveitamento": 69.51,
+   "faltaram": 0,
+   "ultima_chapa_maior_retalho_m2": 0.291,
+   "ultima_chapa_comprimento_mm": 2742.4,
+   "motores_por_chapa": "CCS",
+   "validas": true,
+   "segundos": 70.8
+  }
+ ]
+}

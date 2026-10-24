@@ -1236,8 +1236,8 @@ function thinAngleGenes(genes, rng) {
   return out;
 }
 
-function runHybridMetaheuristicLoop(engineNote = null) {
-  const totalIterations = params.total_iterations;
+function runHybridMetaheuristicLoop(engineNote = null, opts = {}) {
+  const totalIterations = opts.iterations || params.total_iterations;
   const startTime = Date.now();
   const rng = createSeededRandom(SHEET_W * 31 + SHEET_H * 17 + params.seed_offset);
   const goal = params.optimization_goal;
@@ -1290,7 +1290,7 @@ function runHybridMetaheuristicLoop(engineNote = null) {
   const elite = [];
   const N = parts.length;
   let lastProgressSent = Date.now();
-  const timeLimitMs = params.time_limit_s > 0 ? params.time_limit_s * 1000 : 0;
+  const timeLimitMs = opts.timeLimitMs != null ? opts.timeLimitMs : (params.time_limit_s > 0 ? params.time_limit_s * 1000 : 0);
   let executed = 0;
   let stoppedByUser = false;
 
@@ -1420,6 +1420,7 @@ function runHybridMetaheuristicLoop(engineNote = null) {
   finals.sort((a, b) => compareSolutions(b, a, goal));
 
   const totalTimeMs = Date.now() - startTime;
+  if (opts.collect) return { bestResult, finals, executed, totalIterations, improvements, stoppedByUser, totalTimeMs };
   parentPort.postMessage({
     type: 'done',
     totalIterations: executed,
@@ -1471,8 +1472,19 @@ function sparrowNotApplicable() {
   const avail = sheet?.isCustomDxf
     ? Math.abs(polygonArea(sheet.points)) - (sheet.obstacles || []).reduce((s, o) => s + Math.abs(polygonArea(o.points)), 0)
     : (W + 2 * g) * (H + 2 * g);
-  if (need > avail) return 'as peças não cabem numa chapa (área); o motor clássico posiciona o máximo possível';
+  // V5.8 (ADR 009): lote maior que a chapa não volta mais para o clássico; o sparrow escolhe o que cabe (corte da faixa)
   return null;
+}
+
+/** Área inflada das peças maior que a área útil da chapa: o lote não cabe numa chapa só. */
+function lotExceedsSheet() {
+  const b = EFFECTIVE_BORDER_MARGIN, g = NOMINAL_PART_GAP / 2 + sparrowBridge.SAFETY;
+  const H = SHEET_H - 2 * b, W = SHEET_W - 2 * b;
+  const need = parts.reduce((s, p) => s + p.area + polygonPerimeter(p.points) * g + Math.PI * g * g, 0);
+  const avail = sheet?.isCustomDxf
+    ? Math.abs(polygonArea(sheet.points)) - (sheet.obstacles || []).reduce((s, o) => s + Math.abs(polygonArea(o.points)), 0)
+    : (W + 2 * g) * (H + 2 * g);
+  return need > avail;
 }
 
 const snapAngle = (a) => {
@@ -1484,7 +1496,317 @@ const snapAngle = (a) => {
   return best;
 };
 
+/** Divisão de threads, orçamento e tempo do otimizador para este job (ADR 008). */
+function sparrowRunSettings() {
+  const reproducible = !!params.reproducible;
+  const split = reproducible
+    ? sparrowBridge.splitThreads(sparrowBridge.REPRODUCIBLE_THREADS, params.parallel_searches)
+    : sparrowBridge.splitThreads(hardware.threadsForJob || Math.max(1, Math.floor((hardware.totalCores || 2) / Math.max(1, hardware.maxWorkers || 1))), params.parallel_searches);
+  const budget = reproducible ? params.external_budget : null;
+  const timeS = reproducible
+    ? (params.time_limit_s > 0 ? params.time_limit_s : Math.max(60, params.external_time_s * 8))
+    : (params.time_limit_s > 0 ? params.time_limit_s : params.external_time_s);
+  return { reproducible, split, budget, timeS };
+}
+
+/** Converte uma solução do otimizador em peças posicionadas na chapa (coordenadas nominais). */
+function sparrowSolutionToPlaced(sol, types, off, nestedInHolesMap) {
+  const used = new Map();
+  return sol.layout.placed_items.map((pi) => {
+    const t = types[pi.item_id];
+    const k = used.get(pi.item_id) || 0; used.set(pi.item_id, k + 1);
+    const part = t.instances[k];
+    const ang = snapAngle(pi.transformation.rotation);
+    const rot = getRotatedPartGeometry(part, ang);
+    const [tx, ty] = pi.transformation.translation;
+    return {
+      ...part,
+      x: +(rot.offX + tx + off).toFixed(3),
+      y: +(rot.offY + ty + off).toFixed(3),
+      angle: ang,
+      placedWidth: rot.w,
+      placedHeight: rot.h,
+      rotated: ang !== 0,
+      nestedInsideHole: false,
+      placedPoints: rot.pts,
+      placedHoles: rotHolesForInstance(rot, part).map(h => ({ ...h, hasChildPartInside: nestedInHolesMap.has(h.id) }))
+    };
+  });
+}
+
+function groupSparrowTypes(list) {
+  const typeOf = new Map(), types = [];
+  for (const p of list) {
+    const key = p.basePartId || p.id;
+    if (!typeOf.has(key)) { typeOf.set(key, types.length); types.push({ points: p.points, demand: 0, instances: [] }); }
+    const t = types[typeOf.get(key)];
+    t.demand++; t.instances.push(p);
+  }
+  return types;
+}
+
+/** Constantes da chapa para os modos de lote maior que a chapa (ADR 009). */
+function overflowContext() {
+  const b = EFFECTIVE_BORDER_MARGIN;
+  const g = NOMINAL_PART_GAP / 2 + sparrowBridge.SAFETY;
+  const settings = sparrowRunSettings();
+  return {
+    ...settings, b, g, off: b - g,
+    limitX: SHEET_W - b + 1e-6, limitY: SHEET_H - b + 1e-6, usableH: SHEET_H - 2 * b,
+    maxStrip: SHEET_W - 2 * b + 2 * g + 1e-6,
+    inflatedArea: (p) => p.area + polygonPerimeter(p.points) * g + Math.PI * g * g,
+    sheetNet: sheet?.isCustomDxf
+      ? Math.abs(polygonArea(sheet.points)) - (sheet.obstacles || []).reduce((acc, o) => acc + Math.abs(polygonArea(o.points)), 0)
+        - polygonPerimeter(sheet.points) * b
+      : (SHEET_W - 2 * b + 2 * g) * (SHEET_H - 2 * b + 2 * g),
+    rectOuter: [{ x: 0, y: 0 }, { x: SHEET_W, y: 0 }, { x: SHEET_W, y: SHEET_H }, { x: 0, y: SHEET_H }]
+  };
+}
+
+/** Estado de uma execução com várias chamadas ao otimizador: parada, cancelamento e o processo atual. */
+function makeRunState(startTime, totalS, maxRounds) {
+  const st = { cancelled: false, stoppedByUser: false, current: null, roundsRun: 0, allReproducible: true, failure: null, steps: [] };
+  st.onCancel = (m) => { if (m && m.type === 'cancel') { st.cancelled = true; if (st.current) st.current.kill(); } };
+  parentPort.on('message', st.onCancel);
+  st.poll = setInterval(() => {
+    if (stopRequested() && !st.stoppedByUser) { st.stoppedByUser = true; if (st.current) st.current.stop(); }
+    parentPort.postMessage({ type: 'progress', engine: 'SPARROW', iter: st.roundsRun, totalIterations: maxRounds,
+      fraction: Math.min(1, (Date.now() - startTime) / (totalS * 1000)), calcPerSec: 0, improvements: st.roundsRun, isNewRecord: false });
+  }, 250);
+  st.close = () => { clearInterval(st.poll); parentPort.off('message', st.onCancel); };
+  return st;
+}
+
+/** Uma chamada ao otimizador (várias buscas em paralelo), com as peças fixas da chapa como obstáculos. */
+async function sparrowCall(st, ctx, types, fixed, timeS, budgetPart, seed) {
+  const { instance } = sparrowBridge.buildInstance(types, {
+    stripHeight: ctx.usableH, gap: NOMINAL_PART_GAP, allowedAngles: ALLOWED_ROTATIONS, name: 'prumo',
+    sheet: (sheet?.isCustomDxf || fixed.length) ? {
+      outer: sheet?.isCustomDxf ? sheet.points : ctx.rectOuter,
+      holes: sheet?.isCustomDxf ? (sheet.obstacles || []).map(o => o.points) : [],
+      border: ctx.b,
+      fixed: fixed.map(p => ({ points: p.placedPoints.map(q => ({ x: q.x + p.x, y: q.y + p.y })), offset: ctx.g }))
+    } : undefined
+  });
+  st.current = sparrowBridge.runSparrowMulti(instance, {
+    searches: ctx.split.searches, workers: ctx.split.workers, timeS: Math.max(2, timeS),
+    budget: budgetPart ? Math.max(20, Math.round(budgetPart)) : null, seed,
+    onSpawn: (pid) => parentPort.postMessage({ type: 'child', pid }),
+    onExit: (pid) => parentPort.postMessage({ type: 'child-exit', pid })
+  });
+  let outcome = null;
+  try { outcome = await st.current.promise; } catch (e) { st.failure = e.message; if (process.env.PRUMO_DEBUG) console.error('[sparrow/faixa] falhou:', e.message); }
+  st.current = null;
+  if (!outcome || st.cancelled) return null;
+  st.roundsRun++;
+  st.allReproducible = st.allReproducible && outcome.reproducible;
+  st.steps.push(outcome.runs.map(r => r.steps));
+  return outcome;
+}
+
+/**
+ * Rodadas de encher a chapa (ADR 009):
+ *  1. separa um grupo (as maiores primeiro) do tamanho do espaço livre: na 1ª rodada sem peças fixas, 90% da chapa;
+ *     depois, 1,5× a ponta livre depois da última peça;
+ *  2. o otimizador encaixa o grupo numa faixa da altura da chapa, com as peças já colocadas como obstáculos fixos;
+ *     ficam as que terminam dentro da chapa ("corte da faixa");
+ *  3. peça que falhou duas vezes sai; numa rodada em que nada coube, saem as cópias das que falharam e as maiores.
+ * Encaixar TODAS as peças numa faixa só e cortar não serve: o otimizador minimiza o comprimento total e não tem por
+ * que encher o começo da faixa (medido: 0 peças na rodada seguinte).
+ */
+async function fillRounds(st, ctx, { fixed: fixed0, pool: pool0, nestedMap, attemptS, attemptBudget, seedBase, maxRounds, onImprove }) {
+  let fixed = fixed0.slice(), remaining = pool0.slice(), usedShare = 0;
+  const shareFor = (si) => si === 0 ? 0.25 : (1 - usedShare) / Math.max(1, maxRounds - si);
+  const rejected = new Set(), fails = new Map();
+  for (let si = 0; si < maxRounds && remaining.length && !st.stoppedByUser && !st.cancelled; si++) {
+    const pool = remaining.filter(p => !rejected.has(p.id));
+    if (!pool.length) break;
+    const fixedMaxX = fixed.reduce((m, p) => Math.max(m, p.x + p.placedWidth), ctx.b);
+    const empty = fixed.length === 0;
+    const free = empty ? ctx.sheetNet : Math.max(0, (ctx.limitX - fixedMaxX) * ctx.usableH);
+    const smallest = pool.reduce((m, p) => Math.min(m, ctx.inflatedArea(p)), Infinity);
+    const room = Math.max(free * (empty ? 0.9 : 1.5), smallest);
+    const group = [];
+    let acc = 0;
+    for (const p of pool) { const a = ctx.inflatedArea(p); if (acc + a <= room) { group.push(p); acc += a; } }
+    if (!group.length) break;
+    const share = shareFor(si);
+    usedShare += share;
+    const types = groupSparrowTypes(group);
+    const outcome = await sparrowCall(st, ctx, types, fixed, attemptS * share, attemptBudget ? attemptBudget * share : null, seedBase + si * 7);
+    if (!outcome) break;
+    const now = sparrowSolutionToPlaced(outcome.best, types, ctx.off, nestedMap)
+      .filter(p => p.x + p.placedWidth <= ctx.limitX && p.y + p.placedHeight <= ctx.limitY && p.x >= ctx.b - 1e-6 && p.y >= ctx.b - 1e-6);
+    if (process.env.PRUMO_DEBUG) console.error(`[sparrow/faixa] semente ${seedBase} rodada ${si + 1}: ${now.length} de ${group.length} cabem (${remaining.length} restantes); faixa ${outcome.best.strip_width.toFixed(1)} (limite ${(ctx.maxStrip).toFixed(1)})`);
+    const ids = new Set(now.map(p => p.id));
+    for (const p of group) {
+      if (ids.has(p.id)) continue;
+      const f = (fails.get(p.id) || 0) + 1;
+      fails.set(p.id, f);
+      if (f >= 2 || !now.length) rejected.add(p.id);
+    }
+    if (!now.length) {
+      const failedTypes = new Set(group.map(p => p.basePartId || p.id));
+      const minFailed = group.reduce((m, p) => Math.min(m, ctx.inflatedArea(p)), Infinity);
+      for (const p of remaining) if (failedTypes.has(p.basePartId || p.id) || ctx.inflatedArea(p) >= minFailed) rejected.add(p.id);
+      continue;
+    }
+    fixed = fixed.concat(now);
+    remaining = remaining.filter(p => !ids.has(p.id));
+    if (onImprove) onImprove(fixed, remaining);
+  }
+  return { fixed, remaining };
+}
+
+/** Desempate dos modos de lote maior que a chapa: manda a área aproveitada (encher a chapa); contar peças
+ *  favoreceria as pequenas e empurraria as grandes para mais chapas. Empate: a regra de sempre. */
+function cmpOverflow(x, y) {
+  if (!y) return 1;
+  return Math.abs(x.usedArea - y.usedArea) > 0.5 ? x.usedArea - y.usedArea : compareSolutions(x, y, params.optimization_goal);
+}
+
+function assembleSparrow(fixed, remaining, nestedMap) {
+  const res = assembleResult(fixed.slice(), nestedMap, remaining.slice(), 'SPARROW', 'TOP_LEFT');
+  res.engine = 'SPARROW';
+  upgradeToFull(res);
+  planCam(res, params);
+  return res;
+}
+
+/** Motor SPARROW forçado com lote maior que a chapa: tentativas de rodadas com sementes diferentes; vale a melhor. */
+async function runSparrowOverflow(timeFactor = 1, why = null) {
+  const startTime = Date.now();
+  const ctx = overflowContext();
+  const ordered = [...parts].sort((a, c) => c.area - a.area);
+  const { mainSheetParts, nestedInHolesMap } = executeHoleFilling(ordered, params.hole_filling);
+  const expectedIds = parts.map(p => p.id);
+  const totalS = ctx.timeS * timeFactor, MAX_ROUNDS = 8;
+  const st = makeRunState(startTime, totalS, MAX_ROUNDS);
+  let bestRes = null;
+  const results = [];
+  const onImprove = (fixed, remaining) => {
+    const pv = assembleSparrow(fixed, remaining, nestedInHolesMap);
+    if (cmpOverflow(pv, bestRes) > 0) parentPort.postMessage({ type: 'progress', engine: 'SPARROW', iter: st.roundsRun, totalIterations: MAX_ROUNDS,
+      fraction: Math.min(1, (Date.now() - startTime) / (totalS * 1000)), calcPerSec: 0, improvements: st.roundsRun, isNewRecord: true, bestResult: slimResult(pv) });
+  };
+  // tentativas enquanto houver tempo; no modo reproduzível, sempre 2, cada uma com metade dos passos
+  for (let a = 0; a < 3 && !st.stoppedByUser && !st.cancelled; a++) {
+    const elapsedS = (Date.now() - startTime) / 1000;
+    if (ctx.budget) { if (a >= 2) break; } else if (a > 0 && elapsedS > 0.55 * totalS) break;
+    const attemptS = ctx.budget ? totalS / 2 : Math.max(2, totalS - elapsedS);
+    const r = await fillRounds(st, ctx, { fixed: [], pool: mainSheetParts, nestedMap: nestedInHolesMap, attemptS,
+      attemptBudget: ctx.budget ? ctx.budget / 2 : null, seedBase: params.seed_offset + a * 1009, maxRounds: MAX_ROUNDS, onImprove });
+    if (!r.fixed.length) continue;
+    const res = assembleSparrow(r.fixed, r.remaining, nestedInHolesMap);
+    res.validation = validateLayout(res, params, { expectedIds, allowedRotations: ALLOWED_ROTATIONS });
+    if (!res.validation.ok) { if (process.env.PRUMO_DEBUG) console.error('[sparrow/faixa] reprovado:', res.validation.errors.slice(0, 4).map(e => e.msg).join(' | ')); continue; }
+    results.push(res);
+    if (cmpOverflow(res, bestRes) > 0) bestRes = res;
+  }
+  st.close();
+  if (st.cancelled) { parentPort.postMessage({ type: 'cancelled' }); return; }
+  if (!bestRes) {
+    const reason = st.failure ? `otimizador externo falhou (${st.failure})` : 'o otimizador externo não montou um plano válido para esta chapa';
+    return runHybridMetaheuristicLoop(`${reason}; resultado do motor clássico`);
+  }
+  results.sort((x, y) => cmpOverflow(y, x));
+  postOverflowDone(st, ctx, startTime, bestRes, results, why, { attempts: results.length });
+}
+
+function postOverflowDone(st, ctx, startTime, bestRes, archive, why, extra) {
+  const reproducible = !!ctx.budget && st.allReproducible && !st.stoppedByUser;
+  parentPort.postMessage({
+    type: 'done',
+    engine: bestRes.engine === 'CLASSICO' ? 'CLASSICO' : 'SPARROW',
+    engineNote: why,
+    search: { searches: ctx.split.searches, workersPerSearch: ctx.split.workers, budget: ctx.budget, reproducible,
+      steps: st.steps, overflow: { ...extra, rounds: st.roundsRun, placed: bestRes.placedParts.length, unplaced: bestRes.unplacedParts.length } },
+    totalIterations: st.roundsRun,
+    plannedIterations: st.roundsRun,
+    stoppedByTimeLimit: !st.stoppedByUser && !reproducible,
+    stoppedByUser: st.stoppedByUser,
+    totalTimeMs: Date.now() - startTime,
+    calcPerSec: 0,
+    improvements: st.roundsRun,
+    bestResult: slimResult(bestRes),
+    topArchive: archive.map(slimResult)
+  });
+}
+
+/**
+ * Automático com lote maior que a chapa (ADR 009): "o clássico escolhe, o sparrow encaixa".
+ *  1. motor clássico (metade do tempo) escolhe QUAIS peças vão nesta chapa (ele foi feito para isso: põe o máximo);
+ *  2. o sparrow reencaixa só essas peças, mais apertadas (30% do tempo) — sobra uma ponta livre maior;
+ *  3. rodadas de reabastecimento põem peças que sobraram nos vãos e na ponta (20% do tempo);
+ *  4. vale o melhor entre o plano do clássico e o do sparrow, pela área aproveitada; o validador confere os dois.
+ * Medido na V5.8: só as rodadas do sparrow perdiam do clássico em 2 de 3 casos; esta combinação nunca fica abaixo do
+ * plano do clássico que ela mesma calcula (com metade do tempo), porque fica com o melhor dos dois.
+ */
+async function runAutoOverflow() {
+  const startTime = Date.now();
+  const ctx = overflowContext();
+  const expectedIds = parts.map(p => p.id);
+  const totalS = ctx.timeS;
+  // 1. clássico: no modo reproduzível, por avaliações (determinístico); senão, metade do tempo
+  const classic = runHybridMetaheuristicLoop(null, ctx.budget
+    ? { collect: true, timeLimitMs: 0, iterations: Math.max(300, Math.round(params.total_iterations / 2)) }
+    : { collect: true, timeLimitMs: totalS * 500 });
+  const classicBest = classic.bestResult;
+  if (classicBest) classicBest.engine = 'CLASSICO';
+  if (!classicBest || classic.stoppedByUser) return postClassicCollected(classic, startTime, null);
+
+  const st = makeRunState(startTime, totalS, 4);
+  let candidate = null;
+  const placedIds = new Set(classicBest.placedParts.map(p => p.id));
+  const subset = parts.filter(p => placedIds.has(p.id));
+  const rest = parts.filter(p => !placedIds.has(p.id));
+  // 2. o sparrow reencaixa o que o clássico escolheu
+  const ord = [...subset].sort((a, c) => c.area - a.area);
+  const fill1 = executeHoleFilling(ord, params.hole_filling);
+  const types = groupSparrowTypes(fill1.mainSheetParts);
+  const leftS = Math.max(4, totalS - (Date.now() - startTime) / 1000);
+  const outcome = await sparrowCall(st, ctx, types, [], leftS * 0.6, ctx.budget ? ctx.budget * 0.6 : null, params.seed_offset);
+  if (outcome && outcome.best.strip_width <= ctx.maxStrip && !st.cancelled) {
+    let fixed = sparrowSolutionToPlaced(outcome.best, types, ctx.off, fill1.nestedInHolesMap);
+    let nestedMap = new Map(fill1.nestedInHolesMap);
+    let remainingMothers = [];
+    if (rest.length && !st.stoppedByUser) {
+      // 3. reabastecimento com o que sobrou (furos das peças que sobraram também podem receber filhas)
+      const fill2 = executeHoleFilling([...rest].sort((a, c) => c.area - a.area), params.hole_filling);
+      for (const [k, v] of fill2.nestedInHolesMap) nestedMap.set(k, v);
+      const r = await fillRounds(st, ctx, { fixed, pool: fill2.mainSheetParts, nestedMap, attemptS: Math.max(2, totalS - (Date.now() - startTime) / 1000),
+        attemptBudget: ctx.budget ? ctx.budget * 0.4 : null, seedBase: params.seed_offset + 1009, maxRounds: 4 });
+      fixed = r.fixed; remainingMothers = r.remaining;
+    }
+    candidate = assembleSparrow(fixed, remainingMothers, nestedMap);
+    candidate.validation = validateLayout(candidate, params, { expectedIds, allowedRotations: ALLOWED_ROTATIONS });
+    if (!candidate.validation.ok) { if (process.env.PRUMO_DEBUG) console.error('[auto/faixa] reprovado:', candidate.validation.errors.slice(0, 4).map(e => e.msg).join(' | ')); candidate = null; }
+  }
+  st.close();
+  if (st.cancelled) { parentPort.postMessage({ type: 'cancelled' }); return; }
+  if (process.env.PRUMO_DEBUG) console.error(`[auto/faixa] clássico ${classicBest.usedArea.toFixed(0)} mm² (${classicBest.placedParts.length} peças); sparrow ${candidate ? candidate.usedArea.toFixed(0) + ' mm² (' + candidate.placedParts.length + ' peças)' : '—'}`);
+  const archive = [classicBest, ...(classic.finals || []).filter(r => r !== classicBest)];
+  if (candidate && cmpOverflow(candidate, classicBest) > 0) {
+    postOverflowDone(st, ctx, startTime, candidate, [candidate, ...archive].slice(0, 6), null, { classicUsedArea: classicBest.usedArea });
+  } else {
+    postOverflowDone(st, ctx, startTime, classicBest, archive.slice(0, 6),
+      'o lote não cabe numa chapa e o plano do motor clássico aproveitou mais esta chapa', { classicUsedArea: classicBest.usedArea });
+  }
+}
+
+function postClassicCollected(classic, startTime, note) {
+  parentPort.postMessage({
+    type: 'done', engine: 'CLASSICO', engineNote: note,
+    totalIterations: classic.executed, plannedIterations: classic.totalIterations,
+    stoppedByTimeLimit: !classic.stoppedByUser, stoppedByUser: classic.stoppedByUser,
+    totalTimeMs: Date.now() - startTime, calcPerSec: 0, improvements: classic.improvements,
+    bestResult: classic.bestResult ? slimResult(classic.bestResult) : null,
+    topArchive: (classic.finals || []).map(slimResult)
+  });
+}
+
 async function runSparrowEngine() {
+  if (lotExceedsSheet()) return params.engine === 'SPARROW' ? runSparrowOverflow() : runAutoOverflow();
   const startTime = Date.now();
   const goal = params.optimization_goal;
   const ordered = [...parts].sort((a, b) => b.area - a.area);
@@ -1612,6 +1934,8 @@ async function runSparrowEngine() {
   finals.sort((a, c) => compareSolutions(c, a, goal));
   const fitting = perRun.flat();
 
+  // nenhuma solução coube na chapa (a área passou na conta, mas a forma não): escolhe o que cabe, como no lote grande
+  if (!finals.length && !failure && !fitting.length && !stoppedByUser) return params.engine === 'SPARROW' ? runSparrowOverflow(0.5, null) : runAutoOverflow();
   if (!finals.length) {
     const why = failure ? `otimizador externo falhou (${failure})`
       : fitting.length ? 'nenhuma solução do otimizador externo passou no validador'

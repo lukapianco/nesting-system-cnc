@@ -120,11 +120,21 @@ function naivePartCount(dxf) {
       assert.strictEqual(zAfter, zBefore, 'o cancelamento deixou um processo zumbi (o worker não recolheu o filho)');
     });
 
-    await test('lote maior que a chapa: volta para o motor clássico e explica o motivo', async () => {
-      const r = await runPreset({ parts: 'icamento', qty: 12, config: { ...SMALL, engine: 'AUTO' }, hardware: HW });
-      assert.strictEqual(r.done.engine, 'CLASSICO');
-      assert(/não cabem|chapa/.test(r.done.engineNote || ''), `nota: ${r.done.engineNote}`);
-      checkLayout(r);
+    await test('lote maior que a chapa (Automático): o clássico escolhe, o sparrow reencaixa; fica o que aproveitar mais (ADR 009)', async () => {
+      const r = await runPreset({ parts: 'trueshape', qty: 4, config: { ...BIG, engine: 'AUTO', external_time_s: 8, total_iterations: 2000 }, hardware: HW });
+      assert(['SPARROW', 'CLASSICO'].includes(r.done.engine), r.done.engine);
+      assert(r.done.search && r.done.search.overflow && r.done.search.overflow.classicUsedArea > 0, JSON.stringify(r.done.search));
+      if (r.done.engine === 'CLASSICO') assert(/chapa/.test(r.done.engineNote || ''), `nota: ${r.done.engineNote}`);
+      const b = checkLayout(r);
+      assert(b.unplacedParts.length > 0, 'o lote é maior que a chapa: alguma peça tem que sobrar');
+      assert(b.usedArea >= r.done.search.overflow.classicUsedArea - 0.5, 'ficou abaixo do plano do clássico que ele mesmo calculou');
+    });
+    await test('lote maior que a chapa (SPARROW forçado): rodadas com corte da faixa e peças fixas como obstáculo', async () => {
+      const r = await runPreset({ parts: 'trueshape', qty: 4, config: { ...BIG, engine: 'SPARROW', external_time_s: 8 }, hardware: HW });
+      assert.strictEqual(r.done.engine, 'SPARROW', r.done.engineNote);
+      assert(r.done.search.overflow && r.done.search.overflow.rounds >= 1, JSON.stringify(r.done.search));
+      const b = checkLayout(r);
+      assert(b.placedParts.length >= 6 && b.unplacedParts.length > 0, `${b.placedParts.length} postas, ${b.unplacedParts.length} fora`);
     });
 
     for (const [parts, sheet, qty] of [['trueshape', 'sheet_stepped', 1], ['industrial', 'sheet_ramp_hole', 1], ['icamento', 'sheet_ramp_hole', 3]]) {
@@ -187,8 +197,9 @@ function naivePartCount(dxf) {
   });
 
   await test('divisão de threads e sementes das buscas paralelas', () => {
-    assert.deepStrictEqual([1, 2, 3, 4, 12].map(t => S.splitThreads(t)), [
-      { searches: 1, workers: 1 }, { searches: 1, workers: 2 }, { searches: 1, workers: 2 }, { searches: 2, workers: 2 }, { searches: 6, workers: 2 }]);
+    assert.deepStrictEqual([1, 2, 3, 4, 6, 11, 12].map(t => S.splitThreads(t)), [
+      { searches: 1, workers: 1 }, { searches: 1, workers: 2 }, { searches: 1, workers: 3 }, { searches: 1, workers: 4 },
+      { searches: 2, workers: 3 }, { searches: 3, workers: 3 }, { searches: 4, workers: 3 }]);
     assert.deepStrictEqual(S.splitThreads(12, 4), { searches: 4, workers: 3 });
     assert.deepStrictEqual(S.splitThreads(2, 8), { searches: 2, workers: 1 }, 'nunca mais buscas que threads');
     assert.strictEqual(S.searchSeed(7, 0), 7, 'a primeira busca usa a semente pedida');

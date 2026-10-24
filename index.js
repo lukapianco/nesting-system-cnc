@@ -14,6 +14,7 @@ const { buildJob } = require('./jobBuilder');
 const { buildSampleDxf } = require('./presets');
 const { buildDxf, buildRemnantsDxf } = require('./dxfWriter');
 const { findSparrowBinary } = require('./engine/sparrowBridge');
+const { buildStock, runMultiSheet, summarizeMulti } = require('./engine/multiSheet');
 const { recommendParams, listProcesses } = require('./processProfiles');
 
 const app = express();
@@ -153,6 +154,37 @@ function enqueueJob(job, res) {
   }
 }
 
+/**
+ * Um cálculo de UMA chapa num worker. forward(msg) recebe o progresso; a promessa resolve com a mensagem final
+ * ({type:'done'|'error'|'cancelled'}) quando o worker sai, ou null se ele saiu sem resposta (terminado/cancelado).
+ */
+function spawnSheetWorker(job, { parts, sheet, config, threadsForJob, forward }) {
+  return new Promise((resolve) => {
+    const worker = new Worker(path.join(__dirname, 'nestingWorker.js'), {
+      workerData: { parts, sheet, config, hardware: { ...HARDWARE, threadsForJob }, stopFlag: job.stopFlag }
+    });
+    job.worker = worker;
+    let final = null;
+    worker.on('message', (msg) => {
+      if (msg.type === 'child') { // pid do otimizador externo (interno: não vai para a tela)
+        (job.childPids = job.childPids || new Set()).add(msg.pid);
+        childProcesses.set(msg.pid, job.jobId);
+        if (job.aborted) cancelWorker(job);
+        return;
+      }
+      if (msg.type === 'child-exit') { if (job.childPids) job.childPids.delete(msg.pid); childProcesses.delete(msg.pid); return; }
+      if (msg.type === 'done' || msg.type === 'error' || msg.type === 'cancelled') { final = msg; return; }
+      forward(msg);
+    });
+    worker.on('error', (err) => { final = { type: 'error', error: err.message }; });
+    worker.on('exit', () => {
+      killJobChildren(job);
+      if (job.worker === worker) job.worker = null;
+      resolve(final);
+    });
+  });
+}
+
 function runWorker(job) {
   if (job.aborted) return checkQueue();
   activeWorkers++;
@@ -163,49 +195,67 @@ function runWorker(job) {
   // em si quase não usa CPU enquanto o otimizador roda); PRUMO_THREADS_PER_JOB fixa o número, para servidor compartilhado
   const threadsForJob = Number(process.env.PRUMO_THREADS_PER_JOB) > 0 ? Math.floor(Number(process.env.PRUMO_THREADS_PER_JOB))
     : Math.max(1, Math.floor(HARDWARE.totalCores / Math.max(1, activeWorkers)));
-  const worker = new Worker(path.join(__dirname, 'nestingWorker.js'), {
-    workerData: {
-      parts: job.parts,
-      sheet: job.sheet,
-      config: job.config,
-      hardware: { ...HARDWARE, threadsForJob },
-      stopFlag: job.stopFlag
-    }
-  });
-  job.worker = worker;
+  const write = (msg) => {
+    if (job.aborted || job.res.writableEnded) return;
+    job.res.write(`data: ${JSON.stringify({ ...msg, activeWorkers, maxWorkers: HARDWARE.maxWorkers, queueSize: jobQueue.length })}\n\n`);
+  };
+  const stock = job.stock && job.stock.length ? job.stock : buildStock(job.sheet, job.config);
 
-  worker.on('message', (msg) => {
-    if (msg.type === 'child') { // pid do otimizador externo (interno: não vai para a tela)
-      (job.childPids = job.childPids || new Set()).add(msg.pid);
-      childProcesses.set(msg.pid, job.jobId);
-      if (job.aborted) cancelWorker(job);
-      return;
+  (async () => {
+    try {
+      if (stock.length <= 1) {
+        // uma chapa: igual às versões anteriores (a chapa da lista é a da tela ou a desenhada)
+        const one = stock[0];
+        const cfg = one && one.kind !== 'desenhada' ? { ...job.config, sheet_width: one.width, sheet_height: one.height } : job.config;
+        const fin = await spawnSheetWorker(job, { parts: job.parts, sheet: job.sheet, config: cfg, threadsForJob, forward: write });
+        if (fin && fin.type !== 'cancelled') write(fin);
+      } else {
+        // várias chapas e retalhos (ADR 009): chapa a chapa, o que não coube passa para a próxima
+        const t0 = Date.now();
+        const stopped = () => job.aborted || Atomics.load(new Int32Array(job.stopFlag), 0) === 1;
+        const result = await runMultiSheet({
+          parts: job.parts, stock, config: job.config, shouldStop: stopped,
+          runSheet: async (parts, sheet, cfg, spec) => {
+            write({ type: 'sheet-start', sheetIndex: spec.index, sheetCount: stock.length, sheetLabel: spec.label, sheetKind: spec.kind, partsLeft: parts.length });
+            const fin = await spawnSheetWorker(job, { parts, sheet, config: cfg, threadsForJob,
+              forward: (m) => write({ ...m, sheetIndex: spec.index, sheetCount: stock.length, sheetLabel: spec.label, sheetKind: spec.kind }) });
+            return fin && fin.type !== 'cancelled' ? fin : null;
+          }
+        });
+        if (!result.cancelled) {
+          const sheets = result.sheets.map(({ spec, done }) => ({
+            index: spec.index, kind: spec.kind, label: spec.label, width: spec.width, height: spec.height, remnantRef: spec.remnantRef || null,
+            engine: done.engine, engineNote: done.engineNote, search: done.search, totalTimeMs: done.totalTimeMs,
+            bestResult: done.bestResult, topArchive: done.topArchive
+          }));
+          const first = result.sheets[0] ? result.sheets[0].done : null;
+          write({
+            type: 'done', multi: true,
+            engine: sheets.every(x => x.engine === 'SPARROW') ? 'SPARROW' : sheets.every(x => x.engine === 'CLASSICO') ? 'CLASSICO' : 'MISTO',
+            engineNote: null,
+            sheets,
+            skipped: result.skipped.map(({ spec, why }) => ({ index: spec.index, kind: spec.kind, label: spec.label, why })),
+            unplacedParts: result.unplaced.map(p => ({ id: p.id, name: p.name, width: p.width, height: p.height, area: p.area })),
+            summary: summarizeMulti(result, job.parts.length),
+            stock: stock.map(x => ({ index: x.index, kind: x.kind, label: x.label, width: x.width, height: x.height })),
+            bestResult: first ? first.bestResult : null,
+            topArchive: first ? first.topArchive : [],
+            totalTimeMs: Date.now() - t0,
+            stoppedByUser: Atomics.load(new Int32Array(job.stopFlag), 0) === 1,
+            stoppedByTimeLimit: false,
+            totalIterations: sheets.length, plannedIterations: stock.length, improvements: sheets.length, calcPerSec: 0
+          });
+        }
+      }
+    } catch (e) {
+      write({ type: 'error', error: e.message });
+    } finally {
+      if (!job.aborted && !job.res.writableEnded) job.res.end();
+      if (job.jobId) liveJobs.delete(job.jobId);
+      activeWorkers = Math.max(0, activeWorkers - 1);
+      checkQueue();
     }
-    if (msg.type === 'child-exit') { if (job.childPids) job.childPids.delete(msg.pid); childProcesses.delete(msg.pid); return; }
-    if (!job.aborted) {
-      job.res.write(`data: ${JSON.stringify({
-        ...msg,
-        activeWorkers,
-        maxWorkers: HARDWARE.maxWorkers,
-        queueSize: jobQueue.length
-      })}\n\n`);
-      if (msg.type === 'done' || msg.type === 'error') job.res.end();
-    }
-  });
-
-  worker.on('error', (err) => {
-    if (!job.aborted) {
-      job.res.write(`data: ${JSON.stringify({ type: 'error', error: err.message })}\n\n`);
-      job.res.end();
-    }
-  });
-
-  worker.on('exit', () => {
-    killJobChildren(job);
-    if (job.jobId) liveJobs.delete(job.jobId);
-    activeWorkers = Math.max(0, activeWorkers - 1);
-    checkQueue();
-  });
+  })();
 }
 
 function checkQueue() {
@@ -300,8 +350,11 @@ app.post('/api/start-job', (req, res) => {
     }
     const job = buildJob({ parsedDxf: cached.parsed, sheet, config, quantities, importOptions });
     const jobId = `J_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    pendingJobs.set(jobId, { jobId, parts: job.expandedParts, sheet: job.sheet, config: job.normalizedConfig, createdAt: Date.now(), ip: req.ip });
-    res.json({ jobId, catalogParts: job.catalogParts, expandedCount: job.expandedParts.length, normalizedConfig: job.normalizedConfig, warnings: job.warnings });
+    // estoque com a config CRUA: "nenhuma chapa inteira pedida" (com chapa desenhada) não é o mesmo que o padrão 1
+    const stock = buildStock(job.sheet, config);
+    pendingJobs.set(jobId, { jobId, parts: job.expandedParts, sheet: job.sheet, config: job.normalizedConfig, stock, createdAt: Date.now(), ip: req.ip });
+    res.json({ jobId, catalogParts: job.catalogParts, expandedCount: job.expandedParts.length, normalizedConfig: job.normalizedConfig, warnings: job.warnings,
+      stock: stock.map(x => ({ index: x.index, kind: x.kind, label: x.label, width: x.width, height: x.height })) });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }

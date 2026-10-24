@@ -167,6 +167,36 @@ try { ({ chromium } = require('playwright')); } catch (_) { console.log('  - pla
   await stopIfRunning();
   await page.waitForTimeout(1500);
 
+  console.log('\n[UI] várias chapas e retalhos (V5.8)');
+  await page.selectOption('#presetSelect', 'icamento');
+  await page.waitForTimeout(1500);
+  await stopIfRunning();
+  await page.evaluate(() => { document.querySelectorAll('details.step').forEach((d, i) => { d.open = i !== 2; }); });
+  await page.selectOption('#engineSelect', 'CLASSICO');
+  await page.selectOption('#qualityModeSelect', 'RASCUNHO');
+  await page.click('[data-mult="10"]');
+  await page.fill('#fullSheetsInput', '3');
+  await page.dispatchEvent('#fullSheetsInput', 'change');
+  await page.click('#btnAddRemnant');
+  await page.fill('#remnantList .remnant-row [data-k="w"]', '120');
+  await page.fill('#remnantList .remnant-row [data-k="h"]', '90');
+  await page.dispatchEvent('#remnantList .remnant-row [data-k="h"]', 'change');
+  await check('estoque com retalho e 3 chapas: abas por chapa, retalho primeiro, conjunto à direita', async () => {
+    await page.waitForFunction(() => /Pronto em .*chapa/.test(document.querySelector('#progressStatusText').textContent), null, { timeout: 240000 });
+    const tabs = await page.$$eval('#sheetTabs .sheet-tab', els => els.map(e => e.textContent));
+    assert(tabs.length >= 2, `abas: ${tabs.length}`);
+    assert(/retalho/.test(tabs[0]), tabs[0]);
+    assert(await page.isVisible('#multiSummary'));
+    assert(/de 4/.test(await text('#multiSheets')), await text('#multiSheets'));
+    await page.click('#sheetTabs .sheet-tab:nth-child(2)');
+    assert(/Chapa 2/.test(await text('#resultTitle')), await text('#resultTitle'));
+    assert(/APROVADO/.test(await text('#metricValidation')));
+    assert(await page.isVisible('#btnExportAllDxf'));
+  });
+  await page.selectOption('#engineSelect', 'AUTO');
+  await stopIfRunning();
+  await page.waitForTimeout(1500);
+
   await check('sem erros de JavaScript na página', async () => assert.strictEqual(errors.length, 0, errors.slice(0, 3).join(' | ')));
   console.log(`\n${ok} verificações de interface aprovadas`);
   await browser.close();

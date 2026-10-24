@@ -2,6 +2,35 @@
 
 Registro do que foi feito, por quê e como foi verificado. Base para o relatório do PROMPT 2.
 
+## Sessão V5.8 — várias chapas e retalhos, threads pela medição do usuário, painel direito
+
+Pedido: registrar o arquivo do teste de paralelismo (i5-12400, 12 threads); seguir para o passo 2 (várias chapas e
+retalhos no mesmo cálculo); deixar a barra direita no mesmo estilo da esquerda.
+
+### Decisões
+* Threads: buscas de 3 threads, pela medição do usuário (ADR 008, revisão).
+* Várias chapas: chapa a chapa, retalhos do menor para o maior antes das chapas inteiras (ADR 009).
+* Chapa que não comporta tudo: "o clássico escolhe, o sparrow encaixa", depois de medir que as rodadas só do sparrow
+  perdiam do clássico em 2 de 3 casos.
+
+### Erros meus nesta sessão (corrigidos antes da entrega)
+* A primeira versão do lote maior que a chapa encaixava tudo numa faixa e cortava no comprimento da chapa; a rodada de
+  reabastecimento seguinte punha 0 peças (o sparrow só encurta a faixa, não enche o começo dela). Troquei por rodadas
+  com grupos do tamanho do espaço livre.
+* As rodadas falhavam com "could not construct an initial placement": a construção inicial do sparrow tinha um limite
+  de largura que não contava os obstáculos fixos. Ajustado no executável.
+* Rodadas gastas tentando uma peça grande de cada vez (todas as cópias falhavam do mesmo jeito). Agora, quando nada
+  coube, saem juntas as cópias e as peças maiores.
+* Com tudo isso, as rodadas ainda perdiam do clássico em 2 de 3 casos; daí a combinação com o clássico. O comentário
+  do código dizia "nunca fica abaixo do clássico", o que só vale para o plano do clássico que ela mesma calcula (com
+  metade do tempo); corrigido o texto e o teste mede exatamente isso.
+* A cor do furo útil ocupado da V5.7 ficava verde-água (amarelo transparente sobre o azul da peça). Visto na captura
+  da tela; corrigido.
+
+### Verificação
+* `npm test` com e sem o executável; `test/ui_e2e.js` com o executável.
+* `bench/multichapa.js` com 4 lotes, clássico × Automático, 20 s por chapa (ADR 009).
+
 ## Sessão V5.7 — buscas em paralelo, resultado reproduzível, retorno do usuário
 
 Pedido: começar pelo passo 1 combinado (várias sementes em paralelo e resultado igual por semente); o usuário tem
