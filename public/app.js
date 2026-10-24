@@ -79,9 +79,12 @@ const btnStopKeepBest = document.getElementById('btnStopKeepBest');
 
 // Regra do produto: qualidade > velocidade. O modo define o ORÇAMENTO de busca, nunca a correção do resultado.
 const QUALITY_MODES = {
-  RASCUNHO: { iterations: 3000, evaluation_mode: 'FAST', external_time_s: 10 },
-  PADRAO: { iterations: 15000, evaluation_mode: 'PRECISE', external_time_s: 30 },
-  PRODUCAO: { iterations: 60000, evaluation_mode: 'PRECISE', external_time_s: 120 }
+  // external_budget: passos do otimizador no modo reproduzível (ADR 008). Medido na V5.7: uma busca de 2 threads num
+  // Xeon 2,1 GHz faz ~18 passos/s, então os passos duram perto do tempo do modo numa máquina com 4 threads livres;
+  // com menos threads (o modo usa sempre 2 buscas × 2 threads) demora mais, numa CPU mais rápida termina antes
+  RASCUNHO: { iterations: 3000, evaluation_mode: 'FAST', external_time_s: 10, external_budget: 180 },
+  PADRAO: { iterations: 15000, evaluation_mode: 'PRECISE', external_time_s: 30, external_budget: 540 },
+  PRODUCAO: { iterations: 60000, evaluation_mode: 'PRECISE', external_time_s: 120, external_budget: 2160 }
 };
 const engineSelect = document.getElementById('engineSelect');
 
@@ -258,7 +261,7 @@ function updateHints() {
   document.getElementById('cutHint').textContent = `kerf ${kerfWidthInput.value}, ponte ${partClearanceInput.value}`;
   const mode = { RASCUNHO: 'rascunho', PADRAO: 'padrão', PRODUCAO: 'produção', MANUAL: 'manual' }[qualityModeSelect.value];
   const eng = { AUTO: 'automático', SPARROW: 'sparrow', CLASSICO: 'clássico' }[engineSelect.value];
-  document.getElementById('searchHint').textContent = `${eng}, ${mode}`;
+  document.getElementById('searchHint').textContent = `${eng}, ${mode}${document.getElementById('reproducibleInput').checked ? ', reproduzível' : ''}`;
 }
 
 let currentFileName = '';
@@ -616,8 +619,17 @@ async function loadSelectedPreset() {
 
 btnLoadSample.addEventListener('click', loadSelectedPreset);
 presetSelect.addEventListener('change', loadSelectedPreset);
+const seedInput = document.getElementById('seedInput');
+const reproducibleInput = document.getElementById('reproducibleInput');
+seedInput.addEventListener('change', () => {
+  seedCounter = Math.max(1, Math.floor(Number(seedInput.value) || 1));
+  seedInput.value = seedCounter;
+  if (currentUploadId) scheduleOptimization(500);
+});
+reproducibleInput.addEventListener('change', () => { if (currentUploadId) { updateHints(); scheduleOptimization(500); } });
 btnRecalculate.addEventListener('click', () => {
   seedCounter++;
+  seedInput.value = seedCounter;
   startBackendSseOptimization();
 });
 
@@ -687,6 +699,8 @@ async function startBackendSseOptimization() {
     time_limit_s: Number(timeLimitInput.value) || 0,
     engine: engineSelect.value,
     external_time_s: (QUALITY_MODES[qualityModeSelect.value] || {}).external_time_s || 30,
+    reproducible: reproducibleInput.checked,
+    external_budget: (QUALITY_MODES[qualityModeSelect.value] || QUALITY_MODES.PADRAO).external_budget,
     allow_rotation: allowRotationInput.checked,
     grain_restriction: grainRestrictionSelect.value,
     hole_filling: enableInHoleInput.checked,
@@ -778,8 +792,11 @@ async function startBackendSseOptimization() {
       const secs = (msg.totalTimeMs / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 });
       const how = msg.stoppedByUser ? 'parado pelo usuário, melhor plano mantido' : msg.stoppedByTimeLimit ? 'tempo de busca encerrado' : 'busca concluída';
       if (msg.engine === 'SPARROW') {
-        progressStatusText.textContent = `Pronto em ${secs} s com o otimizador sparrow (${how})`;
-        progressStrategyText.textContent = 'Plano conferido pelo validador independente';
+        const se = msg.search || {};
+        const how2 = se.reproducible ? 'orçamento de passos concluído, plano reproduzível' : se.budget && !msg.stoppedByUser ? 'teto de tempo atingido antes dos passos: este plano pode não se repetir' : how;
+        progressStatusText.textContent = `Pronto em ${secs} s com o otimizador sparrow (${how2})`;
+        const buscas = se.searches > 1 ? `${se.searches} buscas em paralelo, ${se.workersPerSearch} thread${se.workersPerSearch > 1 ? 's' : ''} cada; ` : '';
+        progressStrategyText.textContent = `${buscas}semente ${seedCounter}; plano conferido pelo validador independente`;
       } else {
         progressStatusText.textContent = `Pronto em ${secs} s com o motor clássico (${how})`;
         progressStrategyText.textContent = msg.engineNote ? `Motor clássico porque ${msg.engineNote}` : `${msg.totalIterations.toLocaleString('pt-BR')} arranjos testados`;
@@ -914,7 +931,8 @@ window.addEventListener('resize', () => { if (bestSolutionGlobal) drawSheetNesti
 const C = {
   mesa: '#0F2E1F', chapa: '#163D2A', grade: 'rgba(221, 232, 213, 0.07)', gradeForte: 'rgba(221, 232, 213, 0.14)',
   regua: 'rgba(221, 232, 213, 0.55)', limite: '#F97316', peca: '#38BDF8', filha: '#34D399', furo: '#FDE047',
-  sucata: '#F87171', retalhoFundo: 'rgba(167, 139, 250, 0.20)', retalho: '#C4B5FD', lead: '#EF4444', leadRuim: '#F59E0B',
+  // furo sem aproveitamento: cinza hachurado (antes vermelho-claro, que se confundia com a entrada de corte vermelha)
+  sucata: '#7C8A99', sucataRisco: '#C9D3DD', furoOcupado: 'rgba(253, 224, 71, 0.30)', retalhoFundo: 'rgba(167, 139, 250, 0.20)', retalho: '#C4B5FD', lead: '#EF4444', leadRuim: '#F59E0B',
   g00: 'rgba(253, 224, 71, 0.55)', g00Ruim: 'rgba(249, 115, 22, 0.95)', texto: '#0F2E1F', textoClaro: '#E8F0E2'
 };
 const niceStep = (mmPerPx) => {
@@ -922,6 +940,24 @@ const niceStep = (mmPerPx) => {
   const p = Math.pow(10, Math.floor(Math.log10(target)));
   return [1, 2, 5, 10].map(k => k * p).find(v => v >= target) || 10 * p;
 };
+
+// hachura do furo sem aproveitamento (cinza com riscos diagonais): lê como "sobra que cai", sem parecer entrada de corte
+let _scrapPattern = null;
+function scrapPattern() {
+  if (_scrapPattern) return _scrapPattern;
+  const t = document.createElement('canvas');
+  const k = Math.max(1, Math.round(window.devicePixelRatio || 1));
+  t.width = t.height = 8 * k;
+  const g = t.getContext('2d');
+  g.fillStyle = C.sucata; g.fillRect(0, 0, t.width, t.height);
+  g.strokeStyle = C.sucataRisco; g.lineWidth = 1.2 * k;
+  g.beginPath(); g.moveTo(0, t.height); g.lineTo(t.width, 0); g.moveTo(-t.width / 2, t.height / 2); g.lineTo(t.width / 2, -t.height / 2);
+  g.moveTo(t.width / 2, t.height * 1.5); g.lineTo(t.width * 1.5, t.height / 2); g.stroke();
+  const p = ctx.createPattern(t, 'repeat');
+  if (p && p.setTransform && window.DOMMatrix) p.setTransform(new DOMMatrix().scale(1 / k));
+  _scrapPattern = p;
+  return p;
+}
 
 function drawSheetNesting(nesting, isHighlight = false) {
   if (!nesting) return;
@@ -1019,9 +1055,22 @@ function drawSheetNesting(nesting, isHighlight = false) {
     ctx.stroke();
     (part.placedHoles || []).forEach(hole => {
       ring(hole.placedPoints, part.x, part.y);
-      ctx.fillStyle = hole.hasChildPartInside ? C.chapa : (hole.usableHole ? C.furo : C.sucata);
-      ctx.fill();
-      ctx.stroke();
+      if (hole.hasChildPartInside) {
+        // furo útil que recebeu peça: continua amarelo (contorno forte + fundo claro); a filha verde vem por cima
+        ctx.fillStyle = C.furoOcupado;
+        ctx.fill();
+        ctx.strokeStyle = C.furo; ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.strokeStyle = C.mesa; ctx.lineWidth = 1;
+      } else if (hole.usableHole) {
+        ctx.fillStyle = C.furo;
+        ctx.fill();
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = scrapPattern() || C.sucata;
+        ctx.fill();
+        ctx.stroke();
+      }
     });
   });
   // nomes por último (filhas não cobrem o nome da mãe); com fundo para ler sobre furo ou peça

@@ -12,7 +12,7 @@
     <div class="brand" title="Prumo — motor de nesting">
       <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4v16" /><path d="M16 20l-5 6h10z" class="fill" /></svg>
       <span class="brand-name">Prumo</span>
-      <span class="brand-version">5.6</span>
+      <span class="brand-version">5.7</span>
     </div>
     <div class="job-line" id="jobLine">Nenhum desenho carregado</div>
     <div class="topbar-actions">
@@ -250,6 +250,15 @@
               <input type="number" id="iterationsInput" value="15000" min="100" max="250000" step="5000" />
             </div>
           </div>
+          <div class="grid2">
+            <div class="field">
+              <label for="seedInput" title="Ponto de partida da busca. &quot;Calcular de novo&quot; soma 1. Com o resultado reproduzível ligado, a mesma semente dá o mesmo plano.">Semente</label>
+              <input type="number" id="seedInput" value="1" min="1" step="1" />
+            </div>
+            <label class="check" style="align-self:end" title="O otimizador para por número de passos, não por tempo, e divide as threads sempre do mesmo jeito: mesmo desenho, mesmos parâmetros e mesma semente dão o mesmo plano em qualquer servidor. Pode demorar mais numa máquina lenta.">
+              <input type="checkbox" id="reproducibleInput" /><span>Resultado reproduzível</span>
+            </label>
+          </div>
           <div class="field">
             <label for="optimizationGoal">Preferir</label>
             <select id="optimizationGoal" class="select">
@@ -291,6 +300,7 @@
           <span><i class="sw sw-part"></i>peça</span>
           <span><i class="sw sw-child"></i>peça no furo</span>
           <span><i class="sw sw-hole"></i>furo útil</span>
+          <span><i class="sw sw-scrap"></i>furo sem aproveitamento</span>
           <span><i class="sw sw-remnant"></i>retalho</span>
           <span><i class="sw sw-lead"></i>entrada de corte</span>
         </span>

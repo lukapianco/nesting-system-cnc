@@ -84,9 +84,13 @@ function naivePartCount(dxf) {
     await test('cancelar o job (fechar o stream, como ao trocar peça/chapa na tela) encerra o processo do sparrow', async () => {
       const http = require('http');
       const { execSync } = require('child_process');
-      // processos vivos (um zumbi já encerrado, à espera de ser recolhido, não consome CPU e não conta)
-      const count = () => Number(execSync("ps -eo stat=,comm= | grep -v '^Z' | grep -c 'prumo-sparrow' || true").toString().trim());
-      const zombies = () => Number(execSync("ps -eo stat=,comm= | grep '^Z' | grep -c 'prumo-sparrow' || true").toString().trim());
+      // processos vivos (um zumbi já encerrado, à espera de ser recolhido, não consome CPU e não conta).
+      // Windows não tem ps nem zumbi: conta pelo tasklist (V5.7; antes o teste falhava lá por falta do ps)
+      const win = process.platform === 'win32';
+      const count = () => win
+        ? execSync('tasklist /FI "IMAGENAME eq prumo-sparrow.exe" /FO CSV /NH', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().split(/\r?\n/).filter(l => /prumo-sparrow/i.test(l)).length
+        : Number(execSync("ps -eo stat=,comm= | grep -v '^Z' | grep -c 'prumo-sparrow' || true").toString().trim());
+      const zombies = () => win ? 0 : Number(execSync("ps -eo stat=,comm= | grep '^Z' | grep -c 'prumo-sparrow' || true").toString().trim());
       const before = count(), zBefore = zombies();
       const express = require('express');
       const orig = express.application.listen;
@@ -108,7 +112,9 @@ function naivePartCount(dxf) {
       req.destroy();
       await new Promise(r => setTimeout(r, 1500));
       const after = count(), zAfter = zombies();
+      const hw = await (await fetch(base + '/api/hardware')).json();
       server.close();
+      assert.strictEqual(hw.externalOptimizer.running, 0, `o servidor ainda acha que há ${hw.externalOptimizer.running} processo(s) do otimizador rodando`);
       assert(during > before, `o sparrow não chegou a rodar (${before} → ${during})`);
       assert.strictEqual(after, before, `processo do sparrow continuou rodando depois do cancelamento (${after} > ${before})`);
       assert.strictEqual(zAfter, zBefore, 'o cancelamento deixou um processo zumbi (o worker não recolheu o filho)');
@@ -131,6 +137,25 @@ function naivePartCount(dxf) {
       });
     }
 
+    const sig = (b) => b.placedParts.map(p => `${p.id}@${p.x.toFixed(3)},${p.y.toFixed(3)},${p.angle}`).sort().join(';');
+    await test('modo reproduzível: mesma semente = mesmo plano, mesmo com outro número de threads no servidor (ADR 008)', async () => {
+      const cfg = { ...BIG, engine: 'SPARROW', reproducible: true, external_budget: 120, external_time_s: 20, seed_offset: 3 };
+      const a = await runPreset({ parts: 'trueshape', config: cfg, hardware: { ...HW, threadsForJob: 2 } });
+      const b = await runPreset({ parts: 'trueshape', config: cfg, hardware: { ...HW, threadsForJob: 1 } });
+      for (const r of [a, b]) {
+        assert.strictEqual(r.done.engine, 'SPARROW', r.done.engineNote);
+        assert(r.done.search && r.done.search.reproducible, 'o orçamento de passos não terminou antes do teto de tempo: ' + JSON.stringify(r.done.search));
+        checkLayout(r);
+      }
+      assert.strictEqual(sig(a.done.bestResult), sig(b.done.bestResult), 'mesma semente deu planos diferentes');
+    });
+    await test('várias buscas em paralelo: 3 sementes ao mesmo tempo, vale a melhor, layout válido', async () => {
+      const r = await runPreset({ parts: 'trueshape', config: { ...BIG, engine: 'SPARROW', parallel_searches: 3, external_time_s: 4 }, hardware: { ...HW, threadsForJob: 3 } });
+      assert.strictEqual(r.done.engine, 'SPARROW', r.done.engineNote);
+      assert.strictEqual(r.done.search.searches, 3, JSON.stringify(r.done.search));
+      checkLayout(r);
+      assert(r.done.topArchive.every(x => x.validation.ok));
+    });
     await test('Modelo 3: chapa já usada desenhada junto vira a chapa (5 recortes) e os 12 anéis entram nela', async () => {
       const txt = require('fs').readFileSync(require('path').join(__dirname, 'fixtures', 'Modelo_3_s_moldura.dxf'));
       const r = await runPreset({ dxfText: txt, qty: 1, importOptions: { sheetContour: 'CHAPA_1' }, config: { ...BIG, sheetWidth: 3000, sheetHeight: 1200, engine: 'AUTO', external_time_s: 6 }, hardware: HW });
@@ -161,6 +186,15 @@ function naivePartCount(dxf) {
     }
   });
 
+  await test('divisão de threads e sementes das buscas paralelas', () => {
+    assert.deepStrictEqual([1, 2, 3, 4, 12].map(t => S.splitThreads(t)), [
+      { searches: 1, workers: 1 }, { searches: 1, workers: 2 }, { searches: 1, workers: 2 }, { searches: 2, workers: 2 }, { searches: 6, workers: 2 }]);
+    assert.deepStrictEqual(S.splitThreads(12, 4), { searches: 4, workers: 3 });
+    assert.deepStrictEqual(S.splitThreads(2, 8), { searches: 2, workers: 1 }, 'nunca mais buscas que threads');
+    assert.strictEqual(S.searchSeed(7, 0), 7, 'a primeira busca usa a semente pedida');
+    const seeds = new Set(); for (let s = 1; s <= 20; s++) for (let i = 0; i < 6; i++) seeds.add(S.searchSeed(s, i));
+    assert.strictEqual(seeds.size, 120, '"Calcular de novo" (semente + 1) não repete buscas');
+  });
   await test('instância do otimizador: faixa = altura − 2·margem + 2·g, g = D/2 + segurança, ângulos da fibra', () => {
     const { instance, inflate } = S.buildInstance([{ points: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 5 }], demand: 3 }], { stripHeight: 100, gap: 6, allowedAngles: [0, 180, 360] });
     assert.strictEqual(inflate, 3 + S.SAFETY);

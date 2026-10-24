@@ -1,6 +1,12 @@
 //! prumo-sparrow: o otimizador sparrow (MIT) como processo externo do Prumo.
 //!
-//! Uso: prumo-sparrow --input instancia.json --time 60 --seed 7 [--workers 2] [--early]
+//! Uso: prumo-sparrow --input instancia.json --time 60 --seed 7 [--workers 2] [--early] [--budget 400]
+//!
+//! --budget N (Prumo, V5.7): orçamento em PASSOS em vez de tempo. Um passo = uma consulta ao critério de parada, que o
+//! sparrow faz sempre na thread principal e em pontos fixos do algoritmo (a cada rodada do separador e a cada laço de
+//! exploração/compressão). Com a mesma instância, semente, --workers e --budget, o resultado é o mesmo em qualquer
+//! máquina, rápida ou lenta. 80% dos passos vão para a exploração e 20% para a compressão, como no tempo. --time vira
+//! só um teto de segurança: se ele vencer antes do orçamento, o "done" diz reproducible = false.
 //!
 //! Entrada: instância de strip packing no formato JSON do jagua-rs (ExtSPInstance).
 //! Saída (stdout, uma linha JSON por evento):
@@ -27,7 +33,7 @@ use sparrow::util::terminator::Terminator;
 use sparrow::EPOCH;
 use std::io::{BufRead, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -52,14 +58,52 @@ impl Log for StderrLogger {
 }
 static LOGGER: StderrLogger = StderrLogger;
 
-/// Tempo limite + pedido de parada vindo do stdin.
-struct StopTerminator { timeout: Option<Instant>, stop: Arc<AtomicBool> }
+/// Tempo limite (ou orçamento de passos) + pedido de parada vindo do stdin.
+struct StopTerminator {
+    timeout: Option<Instant>,
+    stop: Arc<AtomicBool>,
+    /// modo orçamento: [passos da exploração, passos da compressão]; o tempo vira teto (`deadline`)
+    budget: Option<[u64; 2]>,
+    deadline: Option<Instant>,
+    phase: usize,
+    steps: AtomicU64,       // passos da fase atual
+    total_steps: AtomicU64, // passos de todas as fases
+    time_hit: AtomicBool,
+    stop_hit: AtomicBool,
+}
 impl Terminator for StopTerminator {
     fn kill(&self) -> bool {
-        self.stop.load(Ordering::SeqCst) || self.timeout.is_some_and(|t| Instant::now() > t)
+        if self.stop.load(Ordering::SeqCst) { self.stop_hit.store(true, Ordering::SeqCst); return true; }
+        match self.budget {
+            None => {
+                let k = self.timeout.is_some_and(|t| Instant::now() > t);
+                if k { self.time_hit.store(true, Ordering::SeqCst); } else { self.total_steps.fetch_add(1, Ordering::SeqCst); }
+                k
+            }
+            Some(b) => {
+                if self.deadline.is_some_and(|t| Instant::now() > t) { self.time_hit.store(true, Ordering::SeqCst); return true; }
+                let limit = b[self.phase.min(1)];
+                if self.steps.load(Ordering::SeqCst) >= limit { return true; }
+                self.steps.fetch_add(1, Ordering::SeqCst);
+                self.total_steps.fetch_add(1, Ordering::SeqCst);
+                false
+            }
+        }
     }
-    fn new_timeout(&mut self, timeout: Duration) { self.timeout = Some(Instant::now() + timeout); }
+    fn new_timeout(&mut self, timeout: Duration) {
+        if self.budget.is_some() {
+            // cada fase do sparrow chama new_timeout uma vez, na ordem exploração → compressão
+            if self.timeout.is_some() { self.phase += 1; }
+            self.steps.store(0, Ordering::SeqCst);
+            self.timeout = self.deadline.or(Some(Instant::now() + timeout));
+        } else {
+            self.timeout = Some(Instant::now() + timeout);
+        }
+    }
     fn timeout_at(&self) -> Option<Instant> { self.timeout }
+    fn budget_progress(&self) -> Option<f32> {
+        self.budget.map(|b| self.steps.load(Ordering::SeqCst) as f32 / b[self.phase.min(1)].max(1) as f32)
+    }
 }
 
 #[derive(Serialize)]
@@ -82,10 +126,10 @@ impl SolutionListener for JsonListener {
     }
 }
 
-struct Args { input: String, time: f32, seed: u64, workers: Option<usize>, early: bool }
+struct Args { input: String, time: f32, seed: u64, workers: Option<usize>, early: bool, budget: Option<u64> }
 
 fn parse_args() -> Result<Args> {
-    let mut a = Args { input: String::new(), time: 60.0, seed: 0, workers: None, early: false };
+    let mut a = Args { input: String::new(), time: 60.0, seed: 0, workers: None, early: false, budget: None };
     let v: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < v.len() {
@@ -96,6 +140,7 @@ fn parse_args() -> Result<Args> {
             "--seed" | "-s" => { a.seed = next(i)?.parse()?; i += 1; }
             "--workers" => { a.workers = Some(next(i)?.parse()?); i += 1; }
             "--early" | "-x" => { a.early = true; }
+            "--budget" => { a.budget = Some(next(i)?.parse()?); i += 1; }
             other => bail!("argumento desconhecido: {other}"),
         }
         i += 1;
@@ -233,10 +278,30 @@ fn run() -> Result<()> {
             stop.store(true, Ordering::SeqCst);
         });
     }
-    let mut terminator = StopTerminator { timeout: None, stop };
+    let budget = args.budget.map(|n| {
+        let n = n.max(2);
+        let e = ((n as f64) * DEFAULT_EXPLORE_TIME_RATIO as f64).round() as u64;
+        [e.max(1), (n - e.min(n - 1)).max(1)]
+    });
+    let deadline = budget.map(|_| Instant::now() + total);
+    let mut terminator = StopTerminator {
+        timeout: None, stop, budget, deadline, phase: 0,
+        steps: AtomicU64::new(0), total_steps: AtomicU64::new(0), time_hit: AtomicBool::new(false), stop_hit: AtomicBool::new(false),
+    };
     let mut listener = JsonListener { best_width: f32::INFINITY };
     optimize(instance, rng, &mut listener, &mut terminator, &config.expl_cfg, &config.cmpr_cfg, initial.as_ref())?;
-    emit(&serde_json::json!({ "type": "done", "elapsed_s": EPOCH.elapsed().as_secs_f32() }));
+    let time_hit = terminator.time_hit.load(Ordering::SeqCst);
+    let stop_hit = terminator.stop_hit.load(Ordering::SeqCst);
+    emit(&serde_json::json!({
+        "type": "done",
+        "elapsed_s": EPOCH.elapsed().as_secs_f32(),
+        "steps": terminator.total_steps.load(Ordering::SeqCst),
+        "budget": args.budget,
+        // reproduzível: orçamento de passos e nada de tempo ou parada no meio
+        "reproducible": args.budget.is_some() && !time_hit && !stop_hit,
+        "time_hit": time_hit,
+        "stop_hit": stop_hit
+    }));
     Ok(())
 }
 

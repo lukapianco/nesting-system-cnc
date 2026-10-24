@@ -153,6 +153,20 @@ try { ({ chromium } = require('playwright')); } catch (_) { console.log('  - pla
   await stopIfRunning();
   await page.waitForTimeout(2000);
 
+  await check('semente visível: "Calcular de novo" soma 1; "Resultado reproduzível" aparece no resumo da busca', async () => {
+    const s0 = Number(await page.inputValue('#seedInput'));
+    await page.evaluate(() => { document.querySelectorAll('details.step')[3].open = true; });
+    await stopIfRunning();
+    await page.waitForSelector('#btnRecalculate:not([disabled])', { timeout: 60000 });
+    await page.click('#btnRecalculate');
+    assert.strictEqual(Number(await page.inputValue('#seedInput')), s0 + 1);
+    await page.check('#reproducibleInput');
+    assert(/reproduzível/.test(await text('#searchHint')), await text('#searchHint'));
+    await page.uncheck('#reproducibleInput');
+  });
+  await stopIfRunning();
+  await page.waitForTimeout(1500);
+
   await check('sem erros de JavaScript na página', async () => assert.strictEqual(errors.length, 0, errors.slice(0, 3).join(' | ')));
   console.log(`\n${ok} verificações de interface aprovadas`);
   await browser.close();

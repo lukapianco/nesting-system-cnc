@@ -11,6 +11,10 @@ pub trait Terminator {
 
     /// Returns the instant when a timeout was set, if any
     fn timeout_at(&self) -> Option<Instant>;
+
+    /// Prumo (V5.7): fração já usada do orçamento da fase atual, quando o orçamento é em passos e não em tempo.
+    /// `None` = orçamento por tempo (comportamento original do sparrow).
+    fn budget_progress(&self) -> Option<f32> { None }
 }
 
 #[derive(Debug, Clone)]

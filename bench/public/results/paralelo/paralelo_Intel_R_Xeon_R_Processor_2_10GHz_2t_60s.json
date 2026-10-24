@@ -1,0 +1,35 @@
+{
+ "versao": "5.7.0",
+ "data": "2026-10-24T20:36:27.472Z",
+ "cpu": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+ "threads": 2,
+ "tempo_s": 60,
+ "sementes": 3,
+ "densidade_media_por_config": [
+  {
+   "instancia": "jakobs2",
+   "1x2": 80.4,
+   "2x1": 80.59
+  },
+  {
+   "instancia": "swim",
+   "1x2": 75.24,
+   "2x1": 75.06
+  },
+  {
+   "instancia": "blaz1",
+   "1x2": 82.39,
+   "2x1": 81.24
+  },
+  {
+   "instancia": "shapes1",
+   "1x2": 72.72,
+   "2x1": 72.15
+  },
+  {
+   "instancia": "média",
+   "1x2": 77.69,
+   "2x1": 77.26
+  }
+ ]
+}

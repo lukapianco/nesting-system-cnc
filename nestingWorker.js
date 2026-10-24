@@ -1542,19 +1542,32 @@ async function runSparrowEngine() {
     return res;
   };
 
-  const timeS = params.time_limit_s > 0 ? params.time_limit_s : params.external_time_s;
-  const workers = Math.max(1, Math.floor((hardware.totalCores || 2) / Math.max(1, hardware.maxWorkers || 1)));
-  const fitting = []; // soluções que cabem na chapa, na ordem em que chegaram (cada uma melhor que a anterior)
-  let improvements = 0, lastSent = 0, stoppedByUser = false;
-  const run = sparrowBridge.runSparrow(instance, {
-    timeS, seed: params.seed_offset, workers,
+  // Várias buscas independentes ao mesmo tempo (V5.7, ADR 008): as threads que o servidor deu a este job são
+  // divididas em buscas com sementes diferentes; vale a melhor. No modo reproduzível o orçamento é em passos e a
+  // divisão é FIXA (não depende da máquina), então mesma entrada + mesma semente = mesmo plano em qualquer servidor.
+  const reproducible = !!params.reproducible;
+  const split = reproducible
+    ? sparrowBridge.splitThreads(sparrowBridge.REPRODUCIBLE_THREADS, params.parallel_searches)
+    : sparrowBridge.splitThreads(hardware.threadsForJob || Math.max(1, Math.floor((hardware.totalCores || 2) / Math.max(1, hardware.maxWorkers || 1))), params.parallel_searches);
+  const budget = reproducible ? params.external_budget : null;
+  // no modo reproduzível o tempo é só teto de segurança (se vencer antes, o plano sai, mas avisando)
+  const timeS = reproducible
+    ? (params.time_limit_s > 0 ? params.time_limit_s : Math.max(60, params.external_time_s * 8))
+    : (params.time_limit_s > 0 ? params.time_limit_s : params.external_time_s);
+  const perRun = Array.from({ length: split.searches }, () => []); // soluções que cabem, por busca, na ordem
+  let globalBest = Infinity, improvements = 0, lastSent = 0, stoppedByUser = false;
+  const run = sparrowBridge.runSparrowMulti(instance, {
+    searches: split.searches, workers: split.workers, budget, timeS, seed: params.seed_offset,
     // o servidor guarda o pid para encerrar o processo se o job for cancelado (terminar o worker não o encerra)
     onSpawn: (pid) => parentPort.postMessage({ type: 'child', pid }),
     onExit: (pid) => parentPort.postMessage({ type: 'child-exit', pid }),
-    onSolution: (sol) => {
+    onSolution: (sol, i) => {
       if (sol.strip_width > maxStrip) return;
-      if (fitting.length && sol.strip_width >= fitting[fitting.length - 1].strip_width) return;
-      fitting.push(sol);
+      const mine = perRun[i];
+      if (mine.length && sol.strip_width >= mine[mine.length - 1].strip_width) return;
+      mine.push(sol);
+      if (sol.strip_width >= globalBest) return; // a tela só acompanha o recorde entre todas as buscas
+      globalBest = sol.strip_width;
       improvements++;
       const now = Date.now();
       if (now - lastSent < 400) return;
@@ -1578,20 +1591,26 @@ async function runSparrowEngine() {
     if (stopRequested() && !stoppedByUser) { stoppedByUser = true; run.stop(); }
     parentPort.postMessage({ type: 'progress', engine: 'SPARROW', iter: improvements, totalIterations: Math.max(1, improvements), fraction: Math.min(1, (Date.now() - startTime) / (timeS * 1000)), calcPerSec: 0, improvements, isNewRecord: false });
   }, 250);
-  let failure = null;
-  try { await run.promise; } catch (e) { failure = e.message; }
+  let failure = null, outcome = null;
+  try { outcome = await run.promise; } catch (e) { failure = e.message; }
   clearInterval(poll);
   parentPort.off('message', onCancel);
   if (cancelled) { parentPort.postMessage({ type: 'cancelled' }); return; }
 
-  // as últimas soluções (as melhores) viram o arquivo de alternativas; só entram as aprovadas pelo validador
+  // alternativas: as últimas (melhores) soluções de CADA busca, na ordem busca → solução (não depende de qual busca
+  // terminou antes); só entram as aprovadas pelo validador. Ordenação estável: empate fica com a busca de menor índice.
+  const perSearch = split.searches > 1 ? 3 : 6;
+  const candidates = [];
+  perRun.forEach((list, i) => list.slice(-perSearch).reverse().forEach(sol => candidates.push({ sol, i })));
   const finals = [];
-  for (const sol of fitting.slice(-6).reverse()) {
+  for (const { sol, i } of candidates) {
     const res = finalize(toResult(sol));
+    res.searchIndex = i;
     if (res.validation.ok) finals.push(res);
     else if (process.env.PRUMO_DEBUG) console.error('[sparrow] reprovado:', res.validation.errors.slice(0, 4).map(e => e.msg).join(' | '));
   }
   finals.sort((a, c) => compareSolutions(c, a, goal));
+  const fitting = perRun.flat();
 
   if (!finals.length) {
     const why = failure ? `otimizador externo falhou (${failure})`
@@ -1605,9 +1624,11 @@ async function runSparrowEngine() {
     type: 'done',
     engine: 'SPARROW',
     engineNote: null,
+    search: { searches: split.searches, workersPerSearch: split.workers, budget, reproducible: !!(outcome && outcome.reproducible),
+      steps: outcome ? outcome.runs.map(r => r.steps) : null },
     totalIterations: improvements,
     plannedIterations: improvements,
-    stoppedByTimeLimit: !stoppedByUser,
+    stoppedByTimeLimit: !stoppedByUser && !(outcome && outcome.reproducible),
     stoppedByUser,
     totalTimeMs,
     calcPerSec: 0,

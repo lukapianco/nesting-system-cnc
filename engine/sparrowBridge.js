@@ -82,18 +82,21 @@ function transformRing(points, tr) {
 
 /**
  * Roda o otimizador. onSolution(sol) é chamado a cada solução viável que melhora a faixa.
- * Devolve { best, lines, stderrTail, exitCode }. stop() pede parada cooperativa (fica com a melhor).
+ * budget (V5.7): orçamento em passos em vez de tempo; com a mesma semente, workers e budget, o resultado é o mesmo em
+ * qualquer máquina (timeS vira teto de segurança). Devolve { best, exitCode, stderrTail, steps, reproducible }.
+ * stop() pede parada cooperativa (fica com a melhor).
  */
-function runSparrow(instance, { timeS = 60, seed = 1, workers = 1, early = false, bin = findSparrowBinary(), onSolution = null, onSpawn = null, onExit = null } = {}) {
+function runSparrow(instance, { timeS = 60, seed = 1, workers = 1, early = false, budget = null, bin = findSparrowBinary(), onSolution = null, onSpawn = null, onExit = null } = {}) {
   if (!bin) return { promise: Promise.reject(new Error('prumo-sparrow não encontrado (compile native/prumo-sparrow ou defina PRUMO_SPARROW_BIN)')), stop() {} };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prumo-sparrow-'));
   const file = path.join(dir, 'instancia.json');
   fs.writeFileSync(file, JSON.stringify(instance));
   const args = ['--input', file, '--time', String(timeS), '--seed', String(Math.max(0, Math.floor(seed))), '--workers', String(Math.max(1, workers))];
   if (early) args.push('--early');
+  if (budget) args.push('--budget', String(Math.max(2, Math.floor(budget))));
   const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
   if (onSpawn && child.pid) onSpawn(child.pid);
-  let best = null, buf = '', stderrTail = '', errorMsg = null;
+  let best = null, buf = '', stderrTail = '', errorMsg = null, doneMsg = null;
   const promise = new Promise((resolve, reject) => {
     child.stdout.on('data', d => {
       buf += d.toString('utf8');
@@ -106,6 +109,7 @@ function runSparrow(instance, { timeS = 60, seed = 1, workers = 1, early = false
           if (!best || m.solution.strip_width <= best.strip_width) best = { ...m.solution, elapsed_s: m.elapsed_s, phase: m.phase };
           if (onSolution) onSolution(best);
         } else if (m.type === 'error') errorMsg = m.message;
+        else if (m.type === 'done') doneMsg = m;
       }
     });
     child.stderr.on('data', d => { stderrTail = (stderrTail + d.toString('utf8')).slice(-4000); });
@@ -114,10 +118,54 @@ function runSparrow(instance, { timeS = 60, seed = 1, workers = 1, early = false
       if (onExit && child.pid) onExit(child.pid);
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* temporário */ }
       if (errorMsg || (code !== 0 && !best)) reject(new Error(errorMsg || `prumo-sparrow saiu com código ${code}: ${stderrTail.slice(-400)}`));
-      else resolve({ best, exitCode: code, stderrTail });
+      else resolve({ best, exitCode: code, stderrTail, steps: doneMsg ? doneMsg.steps : null, reproducible: !!(doneMsg && doneMsg.reproducible) });
     });
   });
   return { promise, stop() { try { child.stdin.write('stop\n'); } catch (_) { /* já terminou */ } }, kill() { child.kill(); } };
 }
 
-module.exports = { SAFETY, findSparrowBinary, buildInstance, transformRing, runSparrow, orientationFor };
+/** Semente de cada busca paralela: a busca 0 usa a semente pedida (igual à V5.6); as outras ficam longe dela, para que
+ *  "Calcular de novo" (semente + 1) não repita buscas da rodada anterior. */
+/** Threads do modo reproduzível: fixas, para que o plano não dependa da máquina (numa máquina com menos núcleos ele
+ *  só demora mais). 4 = 2 buscas × 2 threads com a política automática. */
+const REPRODUCIBLE_THREADS = 4;
+
+function searchSeed(seed, i) { return i === 0 ? seed : seed + i * 100003; }
+
+/**
+ * Divide as threads de um job entre buscas independentes (sementes diferentes, ao mesmo tempo) e threads por busca.
+ * Política medida na V5.7 (ADR 008): ver bench/paralelo.js. Com orçamento em passos, a divisão também entra no
+ * resultado, então ela depende só de `threads` (nunca da carga do momento).
+ */
+function splitThreads(threads, searches = 0) {
+  const t = Math.max(1, Math.floor(threads));
+  if (searches > 0) { const k = Math.min(t, Math.floor(searches)); return { searches: k, workers: Math.max(1, Math.floor(t / k)) }; }
+  // automático: buscas de 2 threads (até 1 thread sobrando vira mais uma busca de 1)
+  const k = Math.max(1, Math.floor(t / 2));
+  return { searches: k, workers: t >= 2 ? 2 : 1 };
+}
+
+/**
+ * Várias buscas independentes ao mesmo tempo (multi-start), cada uma com a sua semente. onSolution(sol, i) recebe as
+ * melhorias de cada busca i. Devolve { runs: [{ best, steps, reproducible, error }], best, bestIndex, reproducible }:
+ * best = a menor faixa entre as buscas (empate: a de menor índice), então o resultado não depende de qual terminou antes.
+ */
+function runSparrowMulti(instance, { searches = 1, seed = 1, onSolution = null, ...rest } = {}) {
+  const runs = Array.from({ length: Math.max(1, searches) }, (_, i) => runSparrow(instance, {
+    ...rest, seed: searchSeed(seed, i), onSolution: onSolution ? (sol) => onSolution(sol, i) : null
+  }));
+  const promise = Promise.allSettled(runs.map(r => r.promise)).then(rs => {
+    const out = rs.map(r => r.status === 'fulfilled' ? r.value : { best: null, error: r.reason && r.reason.message });
+    let bestIndex = -1;
+    out.forEach((r, i) => { if (r.best && (bestIndex < 0 || r.best.strip_width < out[bestIndex].best.strip_width)) bestIndex = i; });
+    if (bestIndex < 0) throw new Error(out.map(r => r.error).filter(Boolean)[0] || 'nenhuma busca terminou com solução');
+    return { runs: out, best: out[bestIndex].best, bestIndex, reproducible: out.every(r => r.reproducible) };
+  });
+  return {
+    promise,
+    stop() { runs.forEach(r => r.stop()); },
+    kill() { runs.forEach(r => r.kill && r.kill()); }
+  };
+}
+
+module.exports = { SAFETY, REPRODUCIBLE_THREADS, findSparrowBinary, buildInstance, transformRing, runSparrow, runSparrowMulti, splitThreads, searchSeed, orientationFor };

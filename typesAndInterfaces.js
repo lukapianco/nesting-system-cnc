@@ -137,7 +137,13 @@ function normalizeNestingParams(rawConfig = {}) {
     engine: ['AUTO', 'CLASSICO', 'SPARROW'].includes(String(rawConfig.engine ?? rawConfig.motor ?? 'AUTO').toUpperCase())
       ? String(rawConfig.engine ?? rawConfig.motor ?? 'AUTO').toUpperCase() : 'AUTO',
     // tempo do otimizador externo quando não há limite de tempo (o clássico usa o número de avaliações)
-    external_time_s: Math.min(3600, Math.max(2, Number(rawConfig.external_time_s ?? 30)))
+    external_time_s: Math.min(3600, Math.max(2, Number(rawConfig.external_time_s ?? 30))),
+    // V5.7 (ADR 008): modo reproduzível = orçamento do otimizador externo em PASSOS (não em tempo) e divisão fixa de
+    // threads; mesma entrada + mesma semente = mesmo plano em qualquer servidor (o tempo vira só teto de segurança)
+    reproducible: rawConfig.reproducible === true || rawConfig.reproducible === 'true',
+    external_budget: Math.min(200000, Math.max(20, Math.floor(Number(rawConfig.external_budget ?? 540)))),
+    // buscas independentes ao mesmo tempo (sementes diferentes); 0 = automático pelas threads do job
+    parallel_searches: Math.min(64, Math.max(0, Math.floor(Number(rawConfig.parallel_searches ?? 0))))
   };
 }
 

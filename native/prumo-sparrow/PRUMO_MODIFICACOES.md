@@ -40,12 +40,15 @@ Ele está aqui, inteiro. O resto do Prumo continua sob a licença do Prumo.
 | `src/main.rs` (V5.6) | campo `prumo_sheet` (`outer`, `holes`, `offset`, `shift`): obstáculos = (caixa − contorno) ∪ furos, anéis em sentido horário invertidos antes do offset, inflados por `b − g` com Clipper2 e deslocados para a faixa; vão para `PRUMO_STRIP_OBSTACLES` antes da importação |
 | `src/quantify/tracker.rs`, `src/eval/collision_loss.rs` (V5.6) | colisão com `Hole`/`InferiorQualityZone` passa a somar à perda de contêiner `quantify_collision_poly_poly(peça, obstáculo)` (mesma medida usada entre duas peças); a perda de borda vira `+=`; função pública `static_hazard_shape` |
 | `src/util/assertions.rs` (V5.6) | a conferência de depuração soma perda de borda e de obstáculos |
+| `src/main.rs` (V5.7) | `--budget N`: orçamento em passos (consultas ao critério de parada, sempre na thread principal), 80% exploração e 20% compressão; o tempo vira teto; o `done` informa `steps` e `reproducible` |
+| `src/util/terminator.rs`, `src/optimizer/compress.rs` (V5.7) | método `budget_progress()` no `Terminator` (padrão `None`); com orçamento em passos, o tamanho do encolhimento da compressão segue a fração de passos usada em vez da fração de tempo. Sem `--budget`, idêntico ao original |
 
 O algoritmo (construção LBF, exploração, compressão, separador com GLS, busca por amostragem e descida de
 coordenadas, função de perda por polos) **não foi alterado**. A única mudança de comportamento é da V5.6: no original,
 uma peça sobre um obstáculo fixo era marcada como colisão mas não tinha perda proporcional (o separador não sabia "para
 onde empurrar"); agora a sobreposição com o obstáculo é medida com a mesma função usada entre duas peças. Sem chapa
-desenhada (sem obstáculos), o comportamento é idêntico ao anterior.
+desenhada (sem obstáculos), o comportamento é idêntico ao anterior. Na V5.7, o orçamento em passos (`--budget`) troca o relógio
+por uma contagem; sem essa opção, o comportamento também é idêntico.
 
 ## Compilar
 

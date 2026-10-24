@@ -11,7 +11,7 @@ Serve para laser, plasma, oxicorte, jato d'água e router.
 
 O escopo é **só o nesting**. Estoque de chapas, ordens de serviço e rastreio de sobras ficam no sistema de gestão, que conversa com o Prumo pela API.
 
-> Versão atual: **5.6** — veja o [CHANGELOG](CHANGELOG.md).
+> Versão atual: **5.7** — veja o [CHANGELOG](CHANGELOG.md).
 > Manual de operação: [`docs/Manual_Prumo.md`](docs/Manual_Prumo.md).
 > Decisões técnicas: [`docs/adr/`](docs/adr).
 
@@ -84,6 +84,7 @@ npm run test:ui           # interface real no Chromium (precisa do Playwright)
 bash bench/public/fetch-instances.sh                         # baixa as 13 instâncias públicas (ESICUP)
 node bench/public/run.js --time 60 --seeds 5                 # motor clássico
 node bench/public/run.js --engine sparrow --time 60 --seeds 5
+node bench/paralelo.js                                        # como dividir as threads da sua máquina (ADR 008)
 ```
 
 O benchmark mede a densidade e a validade **fora do motor**: polígonos posicionados, validador independente e contagem de peças. As tabelas estão no CHANGELOG e em `bench/public/results/`. O protocolo está nas ADRs 005 e 006.

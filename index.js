@@ -159,12 +159,16 @@ function runWorker(job) {
 
   job.stopFlag = new SharedArrayBuffer(4);
   if (job.stopRequested) Atomics.store(new Int32Array(job.stopFlag), 0, 1);
+  // threads para o otimizador deste job: as threads lógicas da máquina divididas pelos jobs rodando agora (o servidor
+  // em si quase não usa CPU enquanto o otimizador roda); PRUMO_THREADS_PER_JOB fixa o número, para servidor compartilhado
+  const threadsForJob = Number(process.env.PRUMO_THREADS_PER_JOB) > 0 ? Math.floor(Number(process.env.PRUMO_THREADS_PER_JOB))
+    : Math.max(1, Math.floor(HARDWARE.totalCores / Math.max(1, activeWorkers)));
   const worker = new Worker(path.join(__dirname, 'nestingWorker.js'), {
     workerData: {
       parts: job.parts,
       sheet: job.sheet,
       config: job.config,
-      hardware: HARDWARE,
+      hardware: { ...HARDWARE, threadsForJob },
       stopFlag: job.stopFlag
     }
   });

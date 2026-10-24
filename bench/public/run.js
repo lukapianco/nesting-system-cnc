@@ -23,12 +23,12 @@ const { getBoundingBox, computeSignedArea } = require(path.join(ROOT, 'geometry'
 const INSTANCES = ['albano', 'blaz1', 'dagli', 'fu', 'jakobs1', 'jakobs2', 'mao', 'marques', 'shapes0', 'shapes1', 'shirts', 'swim', 'trousers'];
 
 function args() {
-  const a = process.argv.slice(2), o = { engine: 'classico', workers: 1, merge: false, strict: false, time: 60, seeds: 5, parallel: Math.max(1, os.cpus().length - 1), only: null, out: path.join(__dirname, 'results'), widthFactor: 2.5 };
+  const a = process.argv.slice(2), o = { engine: 'classico', workers: 1, searches: 1, budget: 0, tag: '', merge: false, strict: false, time: 60, seeds: 5, parallel: Math.max(1, os.cpus().length - 1), only: null, out: path.join(__dirname, 'results'), widthFactor: 2.5 };
   for (let i = 0; i < a.length; i++) {
     const k = a[i].replace(/^--/, ''), v = a[i + 1];
     if (k === 'strict' || k === 'merge') { o[k] = true; }
     else if (k === 'rebuild') { o.merge = true; o.only = []; } // só refaz tabela/CSV a partir do JSON salvo
-    else if (k === 'only') { o.only = v.split(','); i++; } else if (k in o) { o[k] = (k === 'out' || k === 'engine') ? v : Number(v); i++; }
+    else if (k === 'only') { o.only = v.split(','); i++; } else if (k in o) { o[k] = (k === 'out' || k === 'engine' || k === 'tag') ? v : Number(v); i++; }
   }
   return o;
 }
@@ -97,8 +97,9 @@ function measure(layout, problem, params) {
   };
 }
 
-/** Motor externo (ADR 006): mesma instância, mesma régua independente. Uma thread por execução, como o clássico. */
-async function runOneSparrow(problem, seed, timeS, workers) {
+/** Motor externo (ADR 006): mesma instância, mesma régua independente. `searches` buscas independentes ao mesmo tempo
+ *  (V5.7, ADR 008), cada uma com `workers` threads; vale a melhor. `budget` > 0 = orçamento em passos (reproduzível). */
+async function runOneSparrow(problem, seed, timeS, workers, searches = 1, budget = 0) {
   const S = require(path.join(ROOT, 'engine', 'sparrowBridge'));
   const sc = problem.scale;
   const types = problem.inst.items.map(it => {
@@ -110,8 +111,11 @@ async function runOneSparrow(problem, seed, timeS, workers) {
   const { instance, inflate } = S.buildInstance(types, { stripHeight: 1000, gap: 0, allowedAngles: angles, name: problem.name });
   const t0 = Date.now();
   const curve = [];
-  const run = S.runSparrow(instance, { timeS, seed, workers, onSolution: b => curve.push({ t: +((Date.now() - t0) / 1000).toFixed(1), len: b.strip_width }) });
-  const { best } = await run.promise;
+  let bestLen = Infinity;
+  const run = S.runSparrowMulti(instance, { searches, timeS, seed, workers, budget: budget || null, onSolution: b => {
+    if (b.strip_width < bestLen) { bestLen = b.strip_width; curve.push({ t: +((Date.now() - t0) / 1000).toFixed(1), len: b.strip_width }); }
+  } });
+  const { best, reproducible } = await run.promise;
   // peças nominais na chapa: faixa começa em (b − g, b − g), com b = 0 no benchmark
   const placedParts = best.layout.placed_items.map((pi, k) => {
     const ring = S.transformRing(types[pi.item_id].points, pi.transformation).map(p => ({ x: p.x - inflate, y: p.y - inflate }));
@@ -123,7 +127,7 @@ async function runOneSparrow(problem, seed, timeS, workers) {
   const layout = { placedParts, unplacedParts: [], sheetWidth: Math.ceil(best.strip_width + 10), sheetHeight: 1000, sheetPoly: null };
   const params = normalizeNestingParams({ ...problem.cfg, sheet_width: layout.sheetWidth });
   const meas = measure(layout, problem, params);
-  return { seed, evals: null, seconds: +((Date.now() - t0) / 1000).toFixed(1), ...meas, curve, largura_folga: null, tentativa: 1, engine: 'sparrow' };
+  return { seed, evals: null, seconds: +((Date.now() - t0) / 1000).toFixed(1), ...meas, curve, largura_folga: null, tentativa: 1, engine: 'sparrow', reproducible };
 }
 
 /** Faixa folgada = fator × (área ÷ altura). Se nem todas as peças couberem (densidade baixa, ex.: shapes0/1), a MESMA
@@ -177,7 +181,7 @@ async function main() {
   const workers = Array.from({ length: Math.min(o.parallel, queue.length) }, async () => {
     while (next < queue.length) {
       const [n, s] = queue[next++];
-      const r = o.engine === 'sparrow' ? await runOneSparrow(problems[n], s, o.time, o.workers) : await runSeed(problems[n], s, o.time, o.widthFactor);
+      const r = o.engine === 'sparrow' ? await runOneSparrow(problems[n], s, o.time, o.workers, o.searches, o.budget) : await runSeed(problems[n], s, o.time, o.widthFactor);
       (results[n] = results[n] || []).push(r);
       console.log(`${n.padEnd(9)} semente ${s}: densidade ${r.density.toFixed(2)}% ${r.valid ? 'válida' : 'INVÁLIDA ' + JSON.stringify(r.errors)} (${r.placed}/${r.expected} peças${r.evals != null ? `, ${r.evals} avaliações` : ''})`);
     }
@@ -185,7 +189,7 @@ async function main() {
   await Promise.all(workers);
 
   const pkg = require(path.join(ROOT, 'package.json'));
-  const stamp = `v${pkg.version}_${o.time}s${o.engine === 'sparrow' ? '_sparrow' : ''}`;
+  const stamp = `v${pkg.version}_${o.budget ? o.budget + 'passos' : o.time + 's'}${o.engine === 'sparrow' ? '_sparrow' : ''}${o.tag ? '_' + o.tag : ''}`;
   // --merge: refaz só as instâncias pedidas e mantém as outras da última rodada com o mesmo carimbo (versão + tempo)
   let names = names0, prevMeta = null;
   const prevFile = path.join(o.out, `public_${stamp}.json`);
@@ -213,7 +217,7 @@ async function main() {
       largura_folga: rs.every(r => r.largura_folga == null) ? null : [...new Set(rs.map(r => r.largura_folga))].join('/')
     };
   });
-  const metaNow = { versao: pkg.version, data: new Date().toISOString(), tempo_s: o.time, sementes: o.seeds, nucleos_paralelos: o.parallel, cpu: os.cpus()[0] && os.cpus()[0].model, motor: o.engine, threads_por_execucao: o.engine === 'sparrow' ? o.workers : 1, largura_folga: o.engine === 'sparrow' ? null : o.widthFactor, refeitas_nesta_rodada: o.merge ? names0 : undefined };
+  const metaNow = { versao: pkg.version, data: new Date().toISOString(), tempo_s: o.time, sementes: o.seeds, nucleos_paralelos: o.parallel, cpu: os.cpus()[0] && os.cpus()[0].model, motor: o.engine, threads_por_execucao: o.engine === 'sparrow' ? o.workers * o.searches : 1, buscas_paralelas: o.engine === 'sparrow' ? o.searches : undefined, threads_por_busca: o.engine === 'sparrow' ? o.workers : undefined, orcamento_passos: o.budget || undefined, largura_folga: o.engine === 'sparrow' ? null : o.widthFactor, refeitas_nesta_rodada: o.merge ? names0 : undefined };
   // numa mescla, a rodada original manda (data, paralelismo, CPU); só a lista de refeitas é desta
   const meta = prevMeta ? { ...prevMeta, refeitas_nesta_rodada: names0, tabela_refeita_em: metaNow.data } : metaNow;
   fs.writeFileSync(path.join(o.out, `public_${stamp}.json`), JSON.stringify({ meta, rows, raw: results }, null, 1));

@@ -1,0 +1,5 @@
+instancia;rotacoes;pecas;validas;media;melhor;pior;desvio;referencia_sparrow;gap_pp;avaliacoes_media;largura_folga
+jakobs2;ORTHOGONAL;25 tipos / 25;3/3;80,59;81,32;80,13;0,64;87,717;6,4;;
+swim;GRAIN_X;10 tipos / 48;3/3;75,06;75,35;74,63;0,38;79,826;4,47;;
+blaz1;GRAIN_X;7 tipos / 28;3/3;81,24;81,86;80,8;0,55;86,224;4,36;;
+shapes1;GRAIN_X;4 tipos / 43;3/3;72,15;73,37;71,24;1,1;76,719;3,35;;

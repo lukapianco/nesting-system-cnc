@@ -1,3 +1,56 @@
+# V5.7 — várias buscas em paralelo, resultado reproduzível, cores dos furos, trilho mais legível
+
+## Várias buscas em paralelo no otimizador sparrow — ADR 008 (fase 3)
+* **Achado:** o servidor dava ao otimizador `núcleos ÷ (núcleos − 1)` threads por cálculo, ou seja, **1 thread numa
+  máquina de 12**. Agora cada cálculo usa as threads lógicas da máquina divididas pelos cálculos que estão rodando
+  (`PRUMO_THREADS_PER_JOB` fixa o número para servidor compartilhado).
+* As threads viram várias buscas independentes, cada uma com a sua semente, ao mesmo tempo; vale a melhor. Divisão
+  automática: buscas de 2 threads (numa máquina de 12 threads, 6 buscas). As alternativas da tela passam a vir de
+  todas as buscas.
+* **Medido aqui (2 threads, 60 s, 3 sementes):** 1 busca × 2 threads deu média de 77,69%; 2 buscas × 1 thread,
+  77,26%. Com 2 threads, dividir não compensa; a política automática já escolhe 1 × 2 nesse caso. Com 12 threads
+  ainda não há medição: **`node bench/paralelo.js`** compara as divisões na sua máquina e grava o resultado em
+  `bench/public/results/paralelo/`.
+
+## Resultado reproduzível (opção na tela) — ADR 008
+* Novo modo do executável, `--budget N`: o otimizador para por **número de passos** em vez de tempo. Um passo é uma
+  consulta ao critério de parada, que o sparrow faz sempre na thread principal. A compressão, que decidia o tamanho
+  do encolhimento pelo relógio, passa a usar a fração de passos. Sem `--budget`, nada muda.
+* Na tela: campo **Semente** (Calcular de novo soma 1) e a caixa **Resultado reproduzível**. Com ela, a divisão de
+  threads é fixa (2 buscas × 2 threads) e os passos vêm do modo: Rascunho 180, Padrão 540, Produção 2.160. O tempo
+  vira teto (8 × o tempo do modo); se ele vencer antes, a tela avisa que o plano pode não se repetir.
+* **Conferido:** swim com 200 passos deu o mesmo plano, byte a byte, livre e preso a 1 núcleo, com 1 e com 2
+  threads por busca. O teste roda o mesmo cálculo com 2 e com 1 thread no servidor e compara as posições.
+* **Custo:** nesta máquina de 2 threads, 900 passos levaram de 114 s a 182 s (por isso o Padrão ficou com 540). Numa
+  máquina com 4 threads livres ou mais, os passos duram perto do tempo do modo.
+
+## Investigado e não mudado: o platô do jakobs2 em 80,40%
+* Não é a margem de segurança do Prumo: o sparrow puro, sem folga e na mesma escala, deu 81,43 e 80,39 (sementes 1
+  e 2); com a folga de segurança, 80,39 e 80,40; com junta em quina no lugar da redonda, 80,39 e 81,48. A diferença
+  está dentro do que a semente muda. A junta em quina foi desfeita (sem ganho comprovado). O caminho continua sendo
+  variar a semente, e a única rodada que passou do platô (81,32) veio de uma busca paralela com outra semente.
+
+## Mesa: cores dos furos (retorno do usuário)
+* **Furo útil com peça dentro** sumia: era pintado da cor da chapa. Agora mantém o contorno amarelo e um fundo
+  amarelo-claro em volta da peça verde.
+* **Furo sem aproveitamento** ganhou cor própria e entrou na legenda: **cinza hachurado**. O vermelho-claro de antes se
+  confundia com a entrada de corte (vermelha).
+
+## Trilho da esquerda mais legível (retorno do usuário)
+* Texto de apoio mais escuro (#3D4B43, era #4F5E55), bordas mais firmes, rótulos de campo em cor de texto e
+  peso médio, cabeçalho de cada passo com fundo próprio e corpo branco, área de arrastar o arquivo com borda forte,
+  avisos do diagnóstico com fundo pela gravidade, nomes e botões das quantidades maiores.
+
+## Teste no Windows (retorno do usuário)
+* O teste de cancelamento usava `ps`, que não existe no Windows, e falhava lá (os outros 13 passaram). Agora usa
+  `tasklist` no Windows e também confere pelo servidor que nenhum processo do otimizador ficou registrado.
+
+## Testes
+* `test/engine_sparrow.js`: 17 (novos: modo reproduzível com 2 e 1 thread no servidor, 3 buscas em paralelo, divisão
+  de threads e sementes das buscas).
+* `test/ui_e2e.js`: 16 (novo: semente visível e opção reproduzível).
+* `test/run.js` 23, `test/dxf_doctor.js` 35, `test/engine_units.js` 5: inalterados.
+
 # V5.6 — chapa desenhada no sparrow, chapa usada vinda do DXF, interface nova, cálculo antigo parado de verdade
 
 ## Chapa desenhada (irregular) no otimizador sparrow — ADR 007 (fase 3)

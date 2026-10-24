@@ -25,8 +25,8 @@ pub fn compression_phase(
         match config.shrink_decay {
             ShrinkDecayStrategy::TimeBased => {
                 let range = config.shrink_range.1 - config.shrink_range.0;
-                let elapsed = start.elapsed();
-                let ratio = elapsed.as_secs_f32() / config.time_limit.as_secs_f32();
+                // Prumo: com orçamento em passos, a fração usada vem dos passos (resultado igual em qualquer máquina)
+                let ratio = term.budget_progress().unwrap_or_else(|| start.elapsed().as_secs_f32() / config.time_limit.as_secs_f32());
                 config.shrink_range.0 + ratio * range
             }
             ShrinkDecayStrategy::FailureBased(r) => {
