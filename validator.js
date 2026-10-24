@@ -6,7 +6,8 @@
  * reimplementa a geometria de propósito, para que um bug do motor não consiga validar a si mesmo.
  *
  * Verifica: peças perdidas/duplicadas, sobreposição, folga mínima D_nom entre peças, margem da chapa e
- * obstáculos, peças filhas dentro do furo (com folga de furo), rotação permitida (fibra) e pierce em sucata.
+ * obstáculos, peças filhas dentro do furo (com folga de furo), retalhos fora das peças (com folga D_nom),
+ * rotação permitida (fibra) e pierce em sucata.
  */
 
 const TOL = 0.02; // mm
@@ -177,6 +178,26 @@ function validateLayout(res, params, ctx = {}) {
       if (o === k) continue;
       const r2 = ringsRelation(k.outer, o.outer);
       if (r2.crossing || r2.contained || r2.dist < gap - TOL) add(errors, 'FILHAS_SE_TOCAM', `${p.name} e ${o.part.name} sem folga entre si.`, { partA: p.id, partB: o.part.id });
+    }
+  }
+
+  // ---- 5b) retalhos úteis: são recortados da chapa como uma peça, então não podem invadir peça nem obstáculo
+  //          e precisam da mesma folga D_nom (senão o corte do retalho passaria pela peça)
+  for (const r of res.remnants || []) {
+    const R = [{ x: r.x, y: r.y }, { x: r.x + r.width, y: r.y }, { x: r.x + r.width, y: r.y + r.height }, { x: r.x, y: r.y + r.height }];
+    const rb = bbox(R);
+    for (const it of top) {
+      if (it.box.minX - gap > rb.maxX || rb.minX - gap > it.box.maxX || it.box.minY - gap > rb.maxY || rb.minY - gap > it.box.maxY) continue;
+      const rel = ringsRelation(R, it.outer);
+      if (rel.crossing || rel.contained) {
+        add(errors, 'RETALHO_SOBRE_PECA', `${r.label || r.id} (${r.width}×${r.height}) invade ${it.part.name}.`, { partA: it.part.id });
+      } else if (rel.dist < gap - TOL) {
+        add(errors, 'RETALHO_FOLGA', `${r.label || r.id} a ${rel.dist.toFixed(2)} mm de ${it.part.name} (mín. ${gap.toFixed(2)}): o corte do retalho atingiria a peça.`, { partA: it.part.id, value: +rel.dist.toFixed(3) });
+      }
+    }
+    for (const o of res.sheetObstacles || []) {
+      const rel = ringsRelation(R, o.points);
+      if (rel.crossing || rel.contained) add(errors, 'RETALHO_SOBRE_OBSTACULO', `${r.label || r.id} invade furo/defeito da chapa.`);
     }
   }
 

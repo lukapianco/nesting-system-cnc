@@ -12,7 +12,7 @@ const { parseDxf, extractContoursFromDxf, buildCustomSheetFromContours, buildCat
 const { normalizeNestingParams } = require('./typesAndInterfaces');
 const { buildJob } = require('./jobBuilder');
 const { buildSampleDxf } = require('./presets');
-const { buildDxf } = require('./dxfWriter');
+const { buildDxf, buildRemnantsDxf } = require('./dxfWriter');
 const { recommendParams, listProcesses } = require('./processProfiles');
 
 const app = express();
@@ -308,6 +308,23 @@ app.post('/api/export-dxf', (req, res) => {
   }
 });
 
+// DXF só dos retalhos úteis (para estoque/rastreio de sobras): cada retalho vira um contorno fechado + texto
+app.post('/api/export-remnants-dxf', (req, res) => {
+  try {
+    const { layout, options = {} } = req.body;
+    if (!layout || !Array.isArray(layout.remnants)) return res.status(400).json({ error: 'Layout inválido.' });
+    if (layout.validation && layout.validation.ok === false) {
+      return res.status(422).json({ error: 'Layout reprovado na validação independente; exportação bloqueada.', validation: layout.validation });
+    }
+    if (!layout.remnants.length) return res.status(422).json({ error: 'Este layout não tem retalhos úteis (acima do Retalho Mín.).' });
+    res.setHeader('Content-Type', 'application/dxf; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="retalhos_${Math.round(layout.sheetWidth)}x${Math.round(layout.sheetHeight)}.dxf"`);
+    res.send(buildRemnantsDxf(layout, options));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // PRESETS DE ENGENHARIA (PEÇAS E CHAPAS IRREGULARES)
 app.get('/api/sample-dxf', (req, res) => {
   res.setHeader('Content-Type', 'application/dxf');
@@ -316,5 +333,5 @@ app.get('/api/sample-dxf', (req, res) => {
 
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, () => {
-  console.log(`Backend CAD/CAM Modular V5 (R-Tree + NFP + BRKGA) ativo em http://localhost:${PORT}`);
+  console.log(`Prumo (motor de nesting) ativo em http://localhost:${PORT}`);
 });

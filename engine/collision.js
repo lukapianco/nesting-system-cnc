@@ -48,11 +48,15 @@ function pointInPlacedRing(px, py, ring, ox, oy) {
  *     inteiro fora; então basta testar UM vértice de cada anel (antes: todos os vértices e pontos médios).
  */
 function polygonsCollideTrueShape(pA, pB, requiredNominalGap) {
+  // Folga mínima efetiva (a mesma do teste exato abaixo). O atalho por caixas usa EXATAMENTE este valor:
+  // a versão anterior usava "folga − 0,01", igual para folgas >= 0,02 mm, mas com folga 0 (benchmark de
+  // strip packing) deixava caixas se sobreporem 0,01 mm e as peças saíam com micro-sobreposição.
+  const minGap = Math.max(0.01, requiredNominalGap - 0.01);
   if (
-    pA.x + pA.placedWidth + requiredNominalGap <= pB.x + 0.01 ||
-    pB.x + pB.placedWidth + requiredNominalGap <= pA.x + 0.01 ||
-    pA.y + pA.placedHeight + requiredNominalGap <= pB.y + 0.01 ||
-    pB.y + pB.placedHeight + requiredNominalGap <= pA.y + 0.01
+    pA.x + pA.placedWidth + minGap <= pB.x ||
+    pB.x + pB.placedWidth + minGap <= pA.x ||
+    pA.y + pA.placedHeight + minGap <= pB.y ||
+    pB.y + pB.placedHeight + minGap <= pA.y
   ) {
     return false;
   }
@@ -73,7 +77,6 @@ function polygonsCollideTrueShape(pA, pB, requiredNominalGap) {
       pointInPlacedRing(pbx, pby, A, ax, ay)) return true;
 
   // 1. fronteiras
-  const minGap = Math.max(0.01, requiredNominalGap - 0.01);
   const minGapSq = minGap * minGap;
 
   if (A.length < EDGE_INDEX_MIN_VERTS && B.length < EDGE_INDEX_MIN_VERTS) {

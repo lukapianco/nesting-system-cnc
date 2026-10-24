@@ -1,0 +1,14 @@
+instancia;rotacoes;pecas;validas;media;melhor;pior;desvio;referencia_sparrow;gap_pp;avaliacoes_media;largura_folga
+albano;GRAIN_X;8 tipos / 24;5/5;68,81;70,76;66,74;1,49;89,821;19,07;2730;2,5
+blaz1;GRAIN_X;7 tipos / 28;5/5;57,8;58,97;56,52;0,88;86,224;27,25;2363;2,5
+dagli;GRAIN_X;10 tipos / 30;5/5;58,37;58,87;57,44;0,58;90,172;31,3;2404;2,5
+fu;ORTHOGONAL;12 tipos / 12;5/5;70,33;72,61;67,82;1,79;92,396;19,79;16268;2,5
+jakobs1;ORTHOGONAL;25 tipos / 25;5/5;65,57;69,2;63,8;2,11;89,247;20,05;2052;2,5
+jakobs2;ORTHOGONAL;25 tipos / 25;5/5;60,15;60,5;59,55;0,35;87,717;27,21;3019;2,5
+mao;ORTHOGONAL;9 tipos / 20;5/5;71,75;72,07;71,45;0,23;86,867;14,8;1139;2,5
+marques;ORTHOGONAL;8 tipos / 24;5/5;66,32;68,35;64,77;1,31;92,015;23,67;1817;2,5
+shapes0;FIXED_0;4 tipos / 43;5/5;37,92;39,28;37,07;1,03;69,998;30,72;1128;4
+shapes1;GRAIN_X;4 tipos / 43;5/5;37,67;39,44;36,44;1,12;76,719;37,28;549;4
+shirts;GRAIN_X;8 tipos / 99;5/5;51,8;53,62;50,66;1,3;90,92;37,3;509;2,5
+swim;GRAIN_X;10 tipos / 48;5/5;52;52,6;50,9;0,66;79,826;27,22;180;2,5
+trousers;GRAIN_X;17 tipos / 64;5/5;55,16;58,11;52,62;2,16;92,615;34,51;851;2,5

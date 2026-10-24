@@ -108,7 +108,10 @@ function normalizeNestingParams(rawConfig = {}) {
     chordal_tolerance: Math.max(0.005, Number(rawConfig.chordal_tolerance ?? 0.03)),
     min_hole_size: Math.max(1, Number(rawConfig.min_hole_size ?? rawConfig.minHoleSize ?? 15)),
     min_remnant_size: Math.max(10, Number(rawConfig.min_remnant_size ?? rawConfig.minRemnantSize ?? 40)),
-    common_line_cutting: Boolean(rawConfig.common_line_cutting ?? rawConfig.commonLine ?? false),
+    // CLC desativado (plano 0.2): só reduzia o espaçamento e o DXF saía com corte duplo. Volta na fase 3 (CLC real).
+    // O valor pedido fica em common_line_requested para a interface avisar.
+    common_line_cutting: false,
+    common_line_requested: Boolean(rawConfig.common_line_cutting ?? rawConfig.commonLine ?? false),
     lead_in_length: Math.max(0, Number(rawConfig.lead_in_length ?? 2.5)),
     lead_in_type: ['ARC', 'LINE_45', 'LINE_90'].includes(rawConfig.lead_in_type) ? rawConfig.lead_in_type : 'ARC',
     pierce_radius: Math.max(0, Number(rawConfig.pierce_radius ?? rawConfig.pierceRadius ?? 1.0)),

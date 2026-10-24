@@ -187,7 +187,11 @@ function maxDeviation(samples, ring) {
     assert.strictEqual(c.length, 1, `entrou: ${c.map(x => x.layers.join('/')).join(', ')}`);
     assert(['HIDDEN_LAYERS', 'DASHED_EXCLUDED'].every(k => codes(c.report).includes(k)), codes(c.report).join(','));
     assert(readDxf(txt).warnings.some(w => w.code === 'PAPER_SPACE'));
-    assert.strictEqual(contoursOf(txt, { includeHiddenLayers: true, includeDashed: true }).length, 7);
+    // AUX e EIXO também são excluídas pelo NOME (camadas auxiliares); forceLayers as traz de volta
+    const opened = contoursOf(txt, { includeHiddenLayers: true, includeDashed: true });
+    assert.strictEqual(opened.length, 5);
+    assert(codes(opened.report).includes('AUX_LAYERS'));
+    assert.strictEqual(contoursOf(txt, { includeHiddenLayers: true, includeDashed: true, forceLayers: ['AUX', 'EIXO'] }).length, 7);
     const none = contoursOf(txt, { excludeLayers: ['CORTE'] });
     assert.strictEqual(none.length, 0);
     assert(codes(none.report).includes('NO_CONTOURS') && none.report.ok === false);
@@ -306,6 +310,67 @@ function maxDeviation(samples, ring) {
     assert.strictEqual(b.placedParts.length + b.unplacedParts.length, 22);
     assert(b.placedParts.length >= 18, `só ${b.placedParts.length} alocadas`);
     assert(b.validation.ok, b.validation.errors.map(e => e.msg).join(' | '));
+  });
+
+  console.log('\n[EXPORTAÇÃO] ida e volta: o DXF exportado volta como as mesmas peças');
+  const { buildDxf, buildRemnantsDxf } = require('../dxfWriter');
+  const { validateLayout } = require('../validator');
+  /** Leitor "ingênuo" típico de outros sistemas: sem filtro de camada, peça/furo por contenção par/ímpar. */
+  function naiveRead(text) {
+    const doc = readDxf(text);
+    const rings = [];
+    let open = 0;
+    for (const e of doc.entities) {
+      if ((e.type === 'POLYLINE' || e.type === 'LWPOLYLINE') && e.closed) rings.push(e.vertices);
+      else if (['POLYLINE', 'LWPOLYLINE', 'LINE', 'ARC'].includes(e.type)) open++;
+    }
+    const area = (r) => Math.abs(computeSignedArea(r));
+    const pip = (p, vs) => { let c = false; for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) { const a = vs[i], b = vs[j]; if ((a.y > p.y) !== (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) c = !c; } return c; };
+    const depth = rings.map((r, i) => rings.filter((o, j) => j !== i && area(o) > area(r) && pip(r[0], o)).length);
+    return { parts: depth.filter(d => d % 2 === 0).length, open };
+  }
+  const NEST = { kerf_width: 0.4, part_clearance: 5.6, sheet_margin: 6, total_iterations: 200, min_hole_size: 60, min_remnant_size: 100 };
+  for (const [preset, extra] of [['icamento', { sheetWidth: 180, sheetHeight: 120, min_hole_size: 10, min_remnant_size: 35 }], ['industrial', { sheetWidth: 1200, sheetHeight: 800 }], ['trueshape', { sheetWidth: 1200, sheetHeight: 800 }]]) {
+    await test(`${preset}: exportação padrão lida pelo leitor próprio E por leitor ingênuo = peças do layout; completa relida pelo próprio`, async () => {
+      const r = await runPreset({ parts: preset, qty: 1, config: { ...NEST, ...extra } });
+      const b = r.done.bestResult;
+      assert(b.validation.ok, b.validation.errors.map(e => e.msg).join(' | '));
+      const n = b.placedParts.length;
+      const def = buildDxf(b, {});
+      const nv = naiveRead(def);
+      assert.strictEqual(nv.parts, n, `ingênuo leu ${nv.parts} peças, layout tem ${n}`);
+      assert.strictEqual(nv.open, 0, 'exportação padrão não pode ter contornos abertos (lead-ins)');
+      for (const opts of [{}, { includeSheet: true, includeRemnants: true, includeLeadIn: true, includeLabels: true }]) {
+        const cat = buildCatalogFromDxf(parseDxf(buildDxf(b, opts)), cfg({ min_hole_size: extra.min_hole_size || 60 }), {});
+        const total = cat.catalogParts.reduce((s, p) => s + p.quantity_detected, 0);
+        assert.strictEqual(total, n, `leitor próprio (${JSON.stringify(opts)}): ${total} peças, layout ${n}`);
+        assert(cat.report.ok);
+        if (opts.includeSheet) assert.strictEqual(cat.frames.length, 1, 'contorno da chapa deve virar moldura');
+      }
+    });
+  }
+  await test('DXF de retalhos: cada retalho é um contorno fechado com medidas; relido como itens', async () => {
+    const r = await runPreset({ parts: 'trueshape', qty: 1, config: { ...NEST, sheetWidth: 1200, sheetHeight: 800 } });
+    const b = r.done.bestResult;
+    assert(b.remnants.length > 0);
+    const txt = buildRemnantsDxf(b);
+    const doc = readDxf(txt);
+    assert.strictEqual(doc.entities.filter(e => e.type === 'POLYLINE' && e.closed).length, b.remnants.length);
+    assert(doc.entities.some(e => e.type === 'TEXT' && /\d+(\.\d)?x\d+/.test(e.text)), 'texto de medidas');
+    assert.strictEqual(naiveRead(txt).parts, b.remnants.length);
+  });
+  await test('retalhos guardam folga D_nom de todas as peças (antes encostavam pela esquerda/baixo) e o validador confere', async () => {
+    for (const [preset, extra] of [['icamento', { sheetWidth: 180, sheetHeight: 120, min_remnant_size: 35 }], ['industrial', { sheetWidth: 1200, sheetHeight: 800 }]]) {
+      const r = await runPreset({ parts: preset, qty: 1, config: { ...NEST, ...extra } });
+      const b = r.done.bestResult;
+      assert(b.validation.ok, preset + ': ' + b.validation.errors.map(e => e.msg).join(' | '));
+      // teste negativo: um retalho empurrado 1 mm para cima de uma peça tem que reprovar
+      const host = b.placedParts.find(p => !p.nestedInsideHole);
+      const bad = { ...b, remnants: [{ id: 'X', label: 'falso', x: host.x - 1, y: host.y, width: 40, height: 40 }] };
+      const params = normalizeNestingParams({ ...NEST, ...extra });
+      const v = validateLayout(bad, params, {});
+      assert(v.errors.some(e => e.type === 'RETALHO_SOBRE_PECA' || e.type === 'RETALHO_FOLGA'), 'validador não pegou retalho sobre peça');
+    }
   });
 
   console.log('\n[SERVIDOR] upload, reanálise, erros 422 e parada');

@@ -65,7 +65,8 @@ const BASE = { sheetWidth: 180, sheetHeight: 120, kerf_width: 0.4, part_clearanc
       sheetWidth: 100, sheetHeight: 100, remnants: [{ x: 50, y: 0, width: 50, height: 100 }],
       placedParts: [{ id: 'A', name: 'A', x: 5, y: 5, placedPoints: L, placedHoles: [] }]
     };
-    const text = buildDxf(layout);
+    const text = buildDxf(layout, { includeRemnants: true });
+    assert(!/3_RETALHOS_UTEIS\r\n\s*66/.test(buildDxf(layout)) && !buildDxf(layout).includes('0_CHAPA_LIMITE\r\n 66'), 'padrão não exporta chapa/retalhos');
     assert(!/\n\n/.test(text.replace(/\r/g, '')), 'não pode haver linha em branco');
     const lines = text.trim().split(/\r?\n/);
     assert(lines.length % 2 === 0, 'DXF precisa ter pares código/valor (nº par de linhas)');
@@ -246,7 +247,8 @@ const BASE = { sheetWidth: 180, sheetHeight: 120, kerf_width: 0.4, part_clearanc
       assert.strictEqual(exp.status, 200);
       const dxf = await exp.text();
       const parsed = new DxfParser().parseSync(dxf);
-      assert(parsed.entities.length > 5);
+      assert(parsed.entities.length >= 2, `entidades: ${parsed.entities.length}`);
+      assert(parsed.entities.every(e => /^(1_CORTE_PECAS|1_PECA_IN_HOLE|2_CORTE_FUROS)$/.test(e.layer)), 'exportação padrão = só camadas de corte');
       const blocked = await fetch(`${base}/api/export-dxf`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ layout: { ...done.bestResult, validation: { ok: false, errors: [{ msg: 'x' }] } } }) });
       assert.strictEqual(blocked.status, 422, 'layout reprovado deve bloquear a exportação');
       const prof = await (await fetch(`${base}/api/recommend-params?process=PLASMA&thickness=10`)).json();

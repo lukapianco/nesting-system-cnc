@@ -1104,6 +1104,41 @@ function renderSeparatedParts(parts) {
 // 5. EXPORTAÇÃO .DXF FINAL MULTI-LAYER (GERADA NO SERVIDOR: R12 UNIVERSAL, SEM ESPELHAMENTO)
 // =========================================================
 
+function currentExportOptions() {
+  return {
+    includeSheet: document.getElementById('exportIncludeSheet').checked,
+    includeRemnants: exportIncludeRemnantsInput.checked,
+    includeLeadIn: exportIncludeLeadInInput.checked,
+    includeLabels: document.getElementById('exportIncludeLabels').checked
+  };
+}
+
+document.getElementById('btnExportRemnantsDxf').addEventListener('click', async () => {
+  if (!bestSolutionGlobal) return;
+  const btn = document.getElementById('btnExportRemnantsDxf');
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/export-remnants-dxf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ layout: bestSolutionGlobal, options: { includeLabels: true } })
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      showCamMessage(`Retalhos: ${err.error || `HTTP ${r.status}`}`);
+      return;
+    }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `retalhos_${Math.round(bestSolutionGlobal.sheetWidth)}x${Math.round(bestSolutionGlobal.sheetHeight)}.dxf`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 btnExportDxf.addEventListener('click', async () => {
   if (!bestSolutionGlobal) return;
   btnExportDxf.disabled = true;
@@ -1113,7 +1148,7 @@ btnExportDxf.addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         layout: bestSolutionGlobal,
-        options: { includeRemnants: exportIncludeRemnantsInput.checked, includeLeadIn: exportIncludeLeadInInput.checked }
+        options: currentExportOptions()
       })
     });
     if (!r.ok) {

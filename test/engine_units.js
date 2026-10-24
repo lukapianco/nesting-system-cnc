@@ -14,8 +14,11 @@ async function test(name, fn) {
 
 /** ORÁCULO: implementação por força bruta da V5.2 (todos os vértices/pontos médios e todos os pares). */
 function collideBruteForceV52(pA, pB, requiredNominalGap) {
-  if (pA.x + pA.placedWidth + requiredNominalGap <= pB.x + 0.01 || pB.x + pB.placedWidth + requiredNominalGap <= pA.x + 0.01 ||
-      pA.y + pA.placedHeight + requiredNominalGap <= pB.y + 0.01 || pB.y + pB.placedHeight + requiredNominalGap <= pA.y + 0.01) return false;
+  // atalho por caixas com a MESMA folga mínima do teste exato (V5.2 usava "folga − 0,01": igual para folga >= 0,02 mm,
+  // inconsistente para folga 0 — corrigido na V5.4; ver engine/collision.js)
+  const mg = Math.max(0.01, requiredNominalGap - 0.01);
+  if (pA.x + pA.placedWidth + mg <= pB.x || pB.x + pB.placedWidth + mg <= pA.x ||
+      pA.y + pA.placedHeight + mg <= pB.y || pB.y + pB.placedHeight + mg <= pA.y) return false;
   const isRectA = pA.points.length === 4 && Math.abs(pA.area - pA.bboxArea) < 2 && (pA.angle || 0) % 90 === 0;
   const isRectB = pB.points.length === 4 && Math.abs(pB.area - pB.bboxArea) < 2 && (pB.angle || 0) % 90 === 0;
   if (isRectA && isRectB) return true;
@@ -64,7 +67,7 @@ function randomPart(r, n, R) {
 
 (async () => {
   console.log('\n[COLISÃO] versão indexada = força bruta da V5.2 (teste de propriedade)');
-  await test('8.000 pares aleatórios (6 a 400 vértices, folgas 0,02 a 12 mm): mesmas respostas', () => {
+  await test('8.000 pares aleatórios (6 a 400 vértices, folgas 0 a 12 mm): mesmas respostas', () => {
     const r = rng(12345);
     let collide = 0, diffs = [];
     for (let k = 0; k < 8000; k++) {
@@ -74,7 +77,7 @@ function randomPart(r, n, R) {
       A.x = r() * 50; A.y = r() * 50;
       // B perto de A: às vezes sobreposto, às vezes encostado, às vezes longe; às vezes dentro (contenção)
       const mode = r();
-      const gap = r() < 0.2 ? 0.02 : r() * 12;
+      const gap = r() < 0.1 ? 0 : r() < 0.2 ? 0.02 : r() * 12;
       if (mode < 0.15) { B.x = A.x + (A.placedWidth - B.placedWidth) / 2; B.y = A.y + (A.placedHeight - B.placedHeight) / 2; }
       else { B.x = A.x + A.placedWidth * (0.6 + r() * 0.8) + (r() - 0.5) * 20; B.y = A.y + (r() - 0.5) * A.placedHeight; }
       const got = polygonsCollideTrueShape(A, B, gap), exp = collideBruteForceV52(A, B, gap);
@@ -93,6 +96,29 @@ function randomPart(r, n, R) {
     const a = { ...sq(10), x: 0, y: 0 }, b = { ...sq(10), x: 16, y: 0 };
     assert.strictEqual(polygonsCollideTrueShape(a, b, 6), false);
     assert.strictEqual(polygonsCollideTrueShape(a, { ...b, x: 15.9 }, 6), true);
+  });
+
+  console.log('\n[FOLGA ZERO] strip packing / peças encostadas (benchmark público)');
+  await test('folga 0: nenhuma sobreposição nem contato (erro de ponto flutuante na consulta de vizinhos)', async () => {
+    const { runPreset } = require('./harness');
+    const S = require('./dxfSynth');
+    const { validateLayout } = require('../validator');
+    const { normalizeNestingParams } = require('../typesAndInterfaces');
+    // medidas do blaz1 escalado (133,32 = 2 × 66,66): somas como 133,32 + 199,98 não são exatas em double
+    const txt = S.buildDxf({ insunits: 4, entities: [S.rect(0, 0, 133.32, 133.32), S.rect(200, 0, 266.64, 199.98), S.rect(500, 0, 266.64, 266.64), S.rect(800, 0, 199.98, 133.32)] });
+    const cfg = { sheetWidth: 1400, sheetHeight: 1000, kerf_width: 0, part_clearance: 0, sheet_margin: 0, total_iterations: 120, hole_filling: false, min_remnant_size: 1e9 };
+    for (const seed of [1, 2, 3]) {
+      const r = await runPreset({ dxfText: txt, qty: 4, config: { ...cfg, seed_offset: seed } });
+      const b = r.done.bestResult;
+      const v = validateLayout({ ...b, cam: null, remnants: [] }, normalizeNestingParams(cfg), {});
+      assert(v.ok, `semente ${seed}: ` + v.errors.slice(0, 2).map(e => e.msg).join(' | '));
+      for (let i = 0; i < b.placedParts.length; i++) for (let j = i + 1; j < b.placedParts.length; j++) {
+        const A = b.placedParts[i], B = b.placedParts[j];
+        const sepX = Math.max(B.x - (A.x + A.placedWidth), A.x - (B.x + B.placedWidth));
+        const sepY = Math.max(B.y - (A.y + A.placedHeight), A.y - (B.y + B.placedHeight));
+        assert(Math.max(sepX, sepY) >= 0.0099, `semente ${seed}: ${A.name} e ${B.name} encostadas (${Math.max(sepX, sepY)})`);
+      }
+    }
   });
 
   console.log('\n[ESTRUTURA] dependências');

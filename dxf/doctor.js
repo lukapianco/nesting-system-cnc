@@ -25,8 +25,26 @@ const DEFAULT_IMPORT = {
   excludeLayers: [],      // nomes de layer a excluir
   includeLayers: null,    // se informado, SÓ estas layers entram
   onlyFrames: null,       // ids de molduras: só as peças dentro delas entram
+  forceLayers: [],        // layers que entram mesmo se a regra automática as excluiria (oculta, tracejada, auxiliar)
   minFeature: 0.5         // mm: contornos com largura E altura menores que isto são ruído
 };
+
+// Papel das camadas que o próprio motor exporta (docs/FORMATO_DXF_EXPORTADO.md): reler o DXF exportado
+// reproduz as peças (a chapa é moldura, retalhos e lead-ins não são peças).
+const KNOWN_LAYER_ROLE = {
+  '0_CHAPA_LIMITE': 'sheet',
+  '0_CHAPA_FUROS_OBSTACULOS': 'sheet_obstacle',
+  '3_RETALHOS_UTEIS': 'remnant',
+  '4_CAM_LEAD_IN': 'aux',
+  '5_TEXTO_PECAS': 'aux'
+};
+// Nomes usuais de camadas que não são geometria de corte (comparação sem acento e sem caixa)
+const AUX_LAYER_RE = /(^|[^a-z])(cota|cotas|cotagem|dim|dims|dimension|dimensions|dimensao|dimensoes|texto|textos|text|anotacao|anotacoes|hatch|hachura|hachuras|lead ?in|lead ?out|leadin|leadout|centro|center|centerline|eixo|eixos|construcao|construction|aux|auxiliar|auxiliares|carimbo|legenda|titulo|title|titleblock|viewport|vport)([^a-z]|$)/;
+const normName = (n) => String(n || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[_\-.]+/g, ' ');
+function layerRole(name) {
+  if (KNOWN_LAYER_ROLE[name]) return KNOWN_LAYER_ROLE[name];
+  return AUX_LAYER_RE.test(normName(name)) ? 'aux' : 'cut';
+}
 
 function normalizeImportOptions(o = {}) {
   const r = { ...DEFAULT_IMPORT, ...(o || {}) };
@@ -39,6 +57,7 @@ function normalizeImportOptions(o = {}) {
   r.onlyFrames = Array.isArray(r.onlyFrames) && r.onlyFrames.length ? r.onlyFrames.map(String) : null;
   r.includeDashed = !!r.includeDashed;
   r.includeHiddenLayers = !!r.includeHiddenLayers;
+  r.forceLayers = Array.isArray(r.forceLayers) ? r.forceLayers.map(String) : [];
   return r;
 }
 
@@ -161,6 +180,7 @@ function analyzeDxf(doc, geom = {}, importOptions = {}) {
         paths: 0, included: 0,
         frozen: !!(L && L.frozen), off: !!(L && L.off), plot: L ? L.plot : true,
         color: L ? L.color : 7,
+        role: layerRole(name),
         reasons: new Set()
       });
     }
@@ -168,16 +188,22 @@ function analyzeDxf(doc, geom = {}, importOptions = {}) {
   };
   const included = [];
   let dashedExcluded = 0, hiddenExcluded = 0, invisibleExcluded = 0;
+  const auxExcluded = new Map(), remnantPaths = [], obstaclePaths = [];
   for (const p of flat.paths) {
     const ls = touchLayer(p.layer);
     ls.paths++;
     let reason = null;
+    const forced = opt.forceLayers.includes(p.layer);
     if (opt.includeLayers && !opt.includeLayers.includes(p.layer)) reason = 'fora da lista de layers escolhidas';
     else if (opt.excludeLayers.includes(p.layer)) reason = 'excluída pelo usuário';
+    else if (forced) reason = null;
     else if (!opt.includeHiddenLayers && (ls.frozen || ls.off)) { reason = ls.frozen ? 'layer congelada' : 'layer desligada'; hiddenExcluded++; }
     else if (!opt.includeHiddenLayers && (!ls.plot || p.layer.toUpperCase() === 'DEFPOINTS')) { reason = 'layer não plotável (auxiliar)'; hiddenExcluded++; }
+    else if (ls.role === 'remnant') { reason = 'camada de retalhos (não são peças)'; remnantPaths.push(p); }
+    else if (ls.role === 'sheet_obstacle') { reason = 'furos/defeitos da chapa (não são peças)'; obstaclePaths.push(p); }
+    else if (ls.role === 'aux') { reason = 'camada auxiliar (cota, texto, eixo, lead-in…)'; auxExcluded.set(p.layer, (auxExcluded.get(p.layer) || 0) + 1); }
     else if (p.invisible) { reason = 'entidade invisível'; invisibleExcluded++; }
-    else if (p.dashed && !opt.includeDashed) { reason = `tipo de linha tracejado/centro (${p.linetype})`; dashedExcluded++; }
+    else if (p.dashed && !opt.includeDashed && !forced) { reason = `tipo de linha tracejado/centro (${p.linetype})`; dashedExcluded++; }
     if (reason) { ls.reasons.add(reason); continue; }
     ls.included++;
     included.push(p);
@@ -185,6 +211,10 @@ function analyzeDxf(doc, geom = {}, importOptions = {}) {
   if (dashedExcluded) add('medio', 'DASHED_EXCLUDED', `${dashedExcluded} entidade(s) com linha tracejada/de centro foram tratadas como linhas auxiliares (não cortadas). Se forem corte, ative "incluir tracejadas".`);
   if (hiddenExcluded) add('medio', 'HIDDEN_LAYERS', `${hiddenExcluded} entidade(s) em layers congeladas, desligadas ou não plotáveis foram ignoradas (não aparecem no CAD).`);
   if (invisibleExcluded) add('baixo', 'INVISIBLE', `${invisibleExcluded} entidade(s) marcadas como invisíveis foram ignoradas.`);
+  if (auxExcluded.size) add('baixo', 'AUX_LAYERS', `Camadas auxiliares ignoradas (não são corte): ${[...auxExcluded].map(([l, n]) => `${l} (${n})`).join(', ')}. Se alguma tiver peças, marque-a na lista de layers.`);
+  const remnantInfo = remnantPaths.map(p => { const b = bboxOf(pathPoints(p, chordTol)); return { w: +(b.maxX - b.minX).toFixed(1), h: +(b.maxY - b.minY).toFixed(1) }; });
+  if (remnantInfo.length) add('info', 'REMNANTS_IN_FILE', `${remnantInfo.length} retalho(s) desenhado(s) na camada de retalhos (não entram como peças): ${remnantInfo.slice(0, 8).map(r => `${r.w}×${r.h}`).join(', ')}${remnantInfo.length > 8 ? '…' : ''} mm.`);
+  if (obstaclePaths.length) add('info', 'SHEET_OBSTACLES_IN_FILE', `${obstaclePaths.length} furo(s)/defeito(s) de chapa na camada própria (não entram como peças).`);
 
   // ---- 3. discretização + costura
   const disc = included.map(p => ({ pts: pathPoints(p, chordTol), closed: p.closed, meta: p }));
@@ -267,30 +297,36 @@ function analyzeDxf(doc, geom = {}, importOptions = {}) {
   const possibleFrames = [];
   if (opt.frameMode === 'auto') {
     for (const r of rings) {
-      if (r.depth !== 0 || !r.children.length) continue;
-      if (!isAxisRectangle(r.pts, r.bb)) continue;
+      // contorno na camada de chapa do próprio motor: é a chapa (mesmo irregular ou vazia)
+      const onSheetLayer = r.layers.length > 0 && r.layers.every(l => layerRole(l) === 'sheet');
+      if (r.depth !== 0 || (!r.children.length && !onSheetLayer)) continue;
+      if (!isAxisRectangle(r.pts, r.bb) && !onSheetLayer) continue;
       const kids = r.children.map(ci => rings[ci]);
       const n = kids.length;
-      const fill = kids.reduce((s, k) => s + k.absArea, 0) / r.absArea;
+      const fill = n ? kids.reduce((s, k) => s + k.absArea, 0) / r.absArea : 0;
       const grandkids = kids.some(k => k.children.length > 0);
-      const circles = kids.filter(k => isCircleLike(k.pts)).length / n;
-      const complexFrac = kids.filter(k => !isSimpleHoleShape(k.pts)).length / n;
+      const circles = n ? kids.filter(k => isCircleLike(k.pts)).length / n : 0;
+      const complexFrac = n ? kids.filter(k => !isSimpleHoleShape(k.pts)).length / n : 0;
       const w = r.bb.maxX - r.bb.minX, h = r.bb.maxY - r.bb.minY;
       const ownTexts = texts.filter(t => t.ring === r.idx).map(t => t.text);
       const layerCue = r.layers.some(l => FRAME_LAYER_RE.test(l));
       const textCue = ownTexts.some(t => FRAME_TEXT_RE.test(t));
       const frameInst = r.instances.length === 1 ? r.instances[0] : null;
       const sameInstance = frameInst && frameInst !== 'M' && kids.every(k => k.instances.length === 1 && k.instances[0] === frameInst);
-      const fromInserts = kids.filter(k => k.instances.some(i => i !== 'M' && i !== frameInst)).length / n;
+      const fromInserts = n ? kids.filter(k => k.instances.some(i => i !== 'M' && i !== frameInst)).length / n : 0;
       const reasons = [];
       if (layerCue) reasons.push(`layer "${r.layers.join(', ')}"`);
       if (textCue) reasons.push('texto de chapa/material dentro dele');
-      if (grandkids) reasons.push('contornos internos têm furos próprios (são peças, não furos)');
+      // "contorno dentro de contorno dentro do retângulo" também é placa com peça aninhada no recorte
+      // (Part-in-Part): só conta junto com conteúdo com forma de peça
+      if (grandkids && complexFrac >= 0.5 && n >= 2) reasons.push('contornos internos têm forma de peça e furos próprios');
       if (fill >= 0.25 && complexFrac >= 0.5) reasons.push(`${Math.round(complexFrac * 100)}% dos contornos internos têm forma de peça e ocupam ${Math.round(fill * 100)}% do retângulo`);
       else if (fill >= 0.25 && fromInserts >= 0.5 && n >= 2) reasons.push(`contornos internos vêm de blocos/matrizes e ocupam ${Math.round(fill * 100)}% do retângulo`);
-      const strong = layerCue || textCue || grandkids;
+      const sheetLayer = r.layers.length > 0 && r.layers.every(l => layerRole(l) === 'sheet');
+      if (sheetLayer) reasons.unshift(`camada ${r.layers.join(', ')} (contorno da chapa)`);
+      const strong = layerCue || textCue || sheetLayer;
       // círculos sozinhos parecem chapa perfurada; com sinal forte (arruelas com furo, layer/texto de chapa) é moldura
-      const isFrame = !sameInstance && reasons.length > 0 && (n >= 2 || strong) && (circles < 0.8 || strong);
+      const isFrame = sheetLayer || (!sameInstance && reasons.length > 0 && (n >= 2 || strong) && (circles < 0.8 || strong));
       if (!isFrame) {
         if (n >= 3 && fill >= 0.25 && circles < 0.8) possibleFrames.push({ w, h, n, fill });
         continue;

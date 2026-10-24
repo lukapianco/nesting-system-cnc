@@ -55,6 +55,25 @@ try { ({ chromium } = require('playwright')); } catch (_) { console.log('  - pla
     assert(/APROVADO/.test(await text('#metricValidation')));
     assert(!(await page.isDisabled('#btnExportDxf')));
   });
+  // camadas das entidades do DXF baixado (código de grupo 8 depois de ENTITIES)
+  const entityLayers = (txt) => {
+    const L = txt.split(/\r?\n/), s = L.findIndex((l, i) => l.trim() === 'ENTITIES' && L[i - 1].trim() === '2');
+    const set = new Set();
+    for (let i = s + 1; i < L.length - 1; i += 2) if (L[i].trim() === '8') set.add(L[i + 1].trim());
+    return [...set].sort();
+  };
+  const download = async (sel) => {
+    const [d] = await Promise.all([page.waitForEvent('download', { timeout: 30000 }), page.click(sel)]);
+    return fs.readFileSync(await d.path(), 'utf8');
+  };
+  await check('exportação padrão só tem camadas de corte; "Incluir chapa" acrescenta 0_CHAPA_LIMITE', async () => {
+    const def = entityLayers(await download('#btnExportDxf'));
+    assert(def.length > 0 && def.every(l => /^(1_CORTE_PECAS|1_PECA_IN_HOLE|2_CORTE_FUROS)$/.test(l)), 'padrão: ' + def.join(','));
+    await page.check('#exportIncludeSheet');
+    const withSheet = entityLayers(await download('#btnExportDxf'));
+    await page.uncheck('#exportIncludeSheet');
+    assert(withSheet.includes('0_CHAPA_LIMITE'), 'com chapa: ' + withSheet.join(','));
+  });
   await page.click('#dxfFrameBanner [data-frame-act="part"]');
   await page.waitForFunction(() => document.querySelectorAll('.part-card').length === 1, null, { timeout: 30000 });
   await check('"Tratar como peça" reanalisa: 1 peça (a moldura) com 22 furos', async () => {

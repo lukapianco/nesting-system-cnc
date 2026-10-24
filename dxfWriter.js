@@ -13,16 +13,27 @@
  * (a versão anterior fazia H - y, o que espelhava cada peça).
  */
 
+/**
+ * Convenção de camadas (documentada em docs/FORMATO_DXF_EXPORTADO.md). Só as camadas de CORTE trazem peças;
+ * as demais são referência e por padrão NÃO são exportadas, porque outros sistemas que classificam peças por
+ * contenção (sem olhar camada) entendem o contorno da chapa como uma peça gigante com as peças como furos,
+ * retalhos como peças e lead-ins como contornos abertos.
+ */
 const LAYERS = [
-  { name: '0', color: 7 },
-  { name: '0_CHAPA_LIMITE', color: 7 },
-  { name: '0_CHAPA_FUROS_OBSTACULOS', color: 30 },
-  { name: '1_CORTE_PECAS', color: 5 },
-  { name: '1_PECA_IN_HOLE', color: 3 },
-  { name: '2_CORTE_FUROS', color: 2 },
-  { name: '3_RETALHOS_UTEIS', color: 6 },
-  { name: '4_CAM_LEAD_IN', color: 1 }
+  { name: '0', color: 7, role: 'none' },
+  { name: '0_CHAPA_LIMITE', color: 7, role: 'sheet' },
+  { name: '0_CHAPA_FUROS_OBSTACULOS', color: 30, role: 'sheet_obstacle' },
+  { name: '1_CORTE_PECAS', color: 5, role: 'cut' },
+  { name: '1_PECA_IN_HOLE', color: 3, role: 'cut' },
+  { name: '2_CORTE_FUROS', color: 2, role: 'cut' },
+  { name: '3_RETALHOS_UTEIS', color: 6, role: 'remnant' },
+  { name: '4_CAM_LEAD_IN', color: 1, role: 'cam' },
+  { name: '5_TEXTO_PECAS', color: 8, role: 'text' }
 ];
+const LAYER_ROLE = Object.fromEntries(LAYERS.map(l => [l.name, l.role]));
+
+/** Opções padrão: só geometria de corte (lida corretamente por qualquer sistema). */
+const DEFAULT_EXPORT = { includeSheet: false, includeRemnants: false, includeLeadIn: false, includeLabels: false };
 
 function fmt(v) {
   const n = Math.round(Number(v) * 10000) / 10000;
@@ -64,6 +75,15 @@ class DxfBuilder {
     this.g(8, layer);
   }
 
+  text(layer, x, y, height, value) {
+    this.track(x, y);
+    this.g(0, 'TEXT');
+    this.g(8, layer);
+    this.g(10, fmt(x)); this.g(20, fmt(y)); this.g(30, 0);
+    this.g(40, fmt(height));
+    this.g(1, String(value).replace(/[\r\n]+/g, ' ').slice(0, 250));
+  }
+
   line(layer, a, b) {
     this.track(a.x, a.y); this.track(b.x, b.y);
     this.g(0, 'LINE');
@@ -79,20 +99,24 @@ function absPts(part, pts) {
 
 /**
  * @param {Object} layout - resultado do worker (placedParts, sheetPoly, sheetObstacles, remnants, cam...)
- * @param {{includeRemnants?: boolean, includeLeadIn?: boolean}} opts
+ * @param {{includeSheet?: boolean, includeRemnants?: boolean, includeLeadIn?: boolean, includeLabels?: boolean}} opts
+ *        Padrão: tudo falso = só contornos de corte (peças, furos, peças dentro de furos), em ordem de corte.
  * @returns {string}
  */
 function buildDxf(layout, opts = {}) {
-  const includeRemnants = opts.includeRemnants !== false;
-  const includeLeadIn = opts.includeLeadIn !== false;
+  const o = { ...DEFAULT_EXPORT, ...(opts || {}) };
+  const includeRemnants = !!o.includeRemnants;
+  const includeLeadIn = !!o.includeLeadIn;
   const W = layout.sheetWidth;
   const H = layout.sheetHeight;
   const b = new DxfBuilder();
 
   // ---- ENTITIES (acumuladas primeiro, para conhecer o EXTMIN/EXTMAX) ----
-  const sheetPts = layout.sheetPoly || [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }];
-  b.polyline('0_CHAPA_LIMITE', sheetPts, true);
-  for (const obs of layout.sheetObstacles || []) b.polyline('0_CHAPA_FUROS_OBSTACULOS', obs.points, true);
+  if (o.includeSheet) {
+    const sheetPts = layout.sheetPoly || [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }];
+    b.polyline('0_CHAPA_LIMITE', sheetPts, true);
+    for (const obs of layout.sheetObstacles || []) b.polyline('0_CHAPA_FUROS_OBSTACULOS', obs.points, true);
+  }
 
   const partById = new Map((layout.placedParts || []).map((p) => [p.id, p]));
   const emittedRings = new Set();
@@ -139,7 +163,40 @@ function buildDxf(layout, opts = {}) {
     }
   }
 
-  // ---- Documento completo ----
+  if (o.includeLabels) {
+    // Nome da peça no centro do retângulo envolvente (camada de texto; não é geometria de corte)
+    for (const part of layout.placedParts || []) {
+      const h = Math.max(2, Math.min(12, Math.min(part.placedWidth, part.placedHeight) * 0.12));
+      b.text('5_TEXTO_PECAS', part.x + part.placedWidth * 0.1, part.y + part.placedHeight / 2, h, String(part.name || part.id).replace(/ \(\d+\/\d+\)$/, ''));
+    }
+  }
+
+  return wrapDocument(b, W, H);
+}
+
+/**
+ * DXF só com os retalhos úteis: cada retalho é um contorno fechado (camada 3_RETALHOS_UTEIS) com um texto de
+ * medidas. Feito para sistemas de estoque/rastreio de sobras (cada retalho vira um item).
+ * @param {{includeLabels?: boolean, includeSheet?: boolean}} opts
+ */
+function buildRemnantsDxf(layout, opts = {}) {
+  const b = new DxfBuilder();
+  const W = layout.sheetWidth, H = layout.sheetHeight;
+  if (opts.includeSheet) b.polyline('0_CHAPA_LIMITE', layout.sheetPoly || [{ x: 0, y: 0 }, { x: W, y: 0 }, { x: W, y: H }, { x: 0, y: H }], true);
+  for (const r of layout.remnants || []) {
+    b.polyline('3_RETALHOS_UTEIS', [
+      { x: r.x, y: r.y }, { x: r.x + r.width, y: r.y },
+      { x: r.x + r.width, y: r.y + r.height }, { x: r.x, y: r.y + r.height }
+    ], true);
+    if (opts.includeLabels !== false) {
+      const h = Math.max(2, Math.min(25, Math.min(r.width, r.height) * 0.08));
+      b.text('5_TEXTO_PECAS', r.x + h, r.y + r.height / 2, h, `${r.label || r.id} ${r.width}x${r.height} mm`);
+    }
+  }
+  return wrapDocument(b, W, H);
+}
+
+function wrapDocument(b, W, H) {
   const out = new DxfBuilder();
   const ex = Number.isFinite(b.minX) ? b : { minX: 0, minY: 0, maxX: W || 0, maxY: H || 0 };
   out.g(0, 'SECTION'); out.g(2, 'HEADER');
@@ -168,4 +225,4 @@ function buildDxf(layout, opts = {}) {
   return out.lines.join('\r\n') + '\r\n';
 }
 
-module.exports = { buildDxf, LAYERS };
+module.exports = { buildDxf, buildRemnantsDxf, LAYERS, LAYER_ROLE, DEFAULT_EXPORT };

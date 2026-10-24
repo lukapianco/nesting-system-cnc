@@ -241,6 +241,16 @@ function getSolidBoxesForPart(placedPart, gap) {
   }];
 }
 
+/**
+ * Caixas que um RETALHO não pode invadir: material da peça + folga D_nom em TODOS os lados.
+ * (Para posicionar peças, getSolidBoxesForPart soma a folga só à direita/acima — correto ali, porque a peça
+ * seguinte começa no fim da caixa. Para retalhos isso deixava o retalho encostado na peça pela esquerda/baixo:
+ * o corte do retalho passaria pela peça.)
+ */
+function getRemnantBlockBoxes(placedPart, gap) {
+  return getSolidBoxesForPart(placedPart, gap).map(b => ({ x: b.x - gap, y: b.y - gap, width: b.width + gap, height: b.height + gap }));
+}
+
 function subtractBoxFromFreeRects(freeRects, box) {
   const newFree = [];
   for (const rect of freeRects) {
@@ -521,6 +531,12 @@ function executeHoleFilling(orderedParts, holeFillingEnabled) {
 // 5. COMPACTAÇÃO CONTÍNUA (JOSTLING) COM ÍNDICE R-TREE 2D
 // =========================================================================
 
+// Folga extra nas consultas de vizinhos à R-tree. As caixas guardadas já somam D_nom, mas com folga ~0 (benchmark de
+// strip packing) um erro de ponto flutuante (133,32 + 199,98 = 333,29999999999995 < 333,3) fazia a consulta não
+// encontrar uma peça ENCOSTADA, e o teste de colisão nem rodava. O teste de colisão é exato, então vizinhos a mais
+// nunca mudam a resposta correta; com as folgas usuais (>= 0,02 mm) os layouts são os mesmos.
+const QUERY_PAD = 0.02;
+
 function compactLayoutWithRTree(placedParts, customSheet, gravityDir) {
   const dirX = (gravityDir === 'TOP_RIGHT' || gravityDir === 'BOTTOM_RIGHT') ? 1 : -1;
   const dirY = (gravityDir === 'BOTTOM_LEFT' || gravityDir === 'BOTTOM_RIGHT') ? 1 : -1;
@@ -561,10 +577,10 @@ function compactLayoutWithRTree(placedParts, customSheet, gravityDir) {
         }
 
         const nearbyCandidates = rtree.search({
-          minX: part.x,
-          minY: part.y,
-          maxX: part.x + part.placedWidth,
-          maxY: part.y + part.placedHeight
+          minX: part.x - QUERY_PAD,
+          minY: part.y - QUERY_PAD,
+          maxX: part.x + part.placedWidth + QUERY_PAD,
+          maxY: part.y + part.placedHeight + QUERY_PAD
         });
 
         const collides = nearbyCandidates.some(o => polygonsCollideTrueShape(part, o, NOMINAL_PART_GAP));
@@ -610,17 +626,17 @@ function isRectValidForRemnant(r, placedParts, customSheet) {
     return false;
   }
 
+  const EPS = 1e-6; // sem folga: o validador independente confere a distância D_nom do retalho às peças
   for (const p of placedParts) {
     if (p.nestedInsideHole) continue;
     if (
-      r.x < p.x + p.placedWidth + NOMINAL_PART_GAP - 0.1 &&
-      r.x + r.width > p.x - 0.1 &&
-      r.y < p.y + p.placedHeight + NOMINAL_PART_GAP - 0.1 &&
-      r.y + r.height > p.y - 0.1
+      r.x < p.x + p.placedWidth + NOMINAL_PART_GAP - EPS &&
+      r.x + r.width > p.x - NOMINAL_PART_GAP + EPS &&
+      r.y < p.y + p.placedHeight + NOMINAL_PART_GAP - EPS &&
+      r.y + r.height > p.y - NOMINAL_PART_GAP + EPS
     ) {
-      const boxes = getSolidBoxesForPart(p, NOMINAL_PART_GAP);
-      for (const b of boxes) {
-        if (r.x < b.x + b.width - 0.1 && r.x + r.width > b.x + 0.1 && r.y < b.y + b.height - 0.1 && r.y + r.height > b.y + 0.1) {
+      for (const bx of getRemnantBlockBoxes(p, NOMINAL_PART_GAP)) {
+        if (r.x < bx.x + bx.width - EPS && r.x + r.width > bx.x + EPS && r.y < bx.y + bx.height - EPS && r.y + r.height > bx.y + EPS) {
           return false;
         }
       }
@@ -631,54 +647,41 @@ function isRectValidForRemnant(r, placedParts, customSheet) {
     return true;
   }
 
+  // Chapa irregular: o retalho fica dentro do contorno e longe dos furos/defeitos com a mesma margem das peças.
+  // Teste exato (segmento × retângulo expandido), sem a "folga" de 0,5 mm para dentro que deixava o retalho
+  // atravessar a borda de um furo da chapa.
+  const m = EFFECTIVE_BORDER_MARGIN;
+  const ex = { x0: r.x - m + EPS, y0: r.y - m + EPS, x1: r.x + r.width + m - EPS, y1: r.y + r.height + m - EPS };
   const sheetPoly = customSheet.points;
-  const obstacles = customSheet.obstacles || [];
-  const corners = [
-    { x: r.x + 0.5, y: r.y + 0.5 },
-    { x: r.x + r.width - 0.5, y: r.y + 0.5 },
-    { x: r.x + r.width - 0.5, y: r.y + r.height - 0.5 },
-    { x: r.x + 0.5, y: r.y + r.height - 0.5 }
-  ];
-
-  for (const c of corners) {
-    if (!isPointInPolygon(c, sheetPoly)) return false;
+  const corners = [{ x: r.x, y: r.y }, { x: r.x + r.width, y: r.y }, { x: r.x + r.width, y: r.y + r.height }, { x: r.x, y: r.y + r.height }];
+  for (const c of corners) if (!isPointInPolygon(c, sheetPoly)) return false;
+  if (ringTouchesBox(sheetPoly, ex)) return false;
+  for (const obs of customSheet.obstacles || []) {
+    if (obs.maxX < ex.x0 || obs.minX > ex.x1 || obs.maxY < ex.y0 || obs.minY > ex.y1) continue;
+    if (ringTouchesBox(obs.points, ex)) return false;
+    if (isPointInPolygon({ x: r.x + r.width / 2, y: r.y + r.height / 2 }, obs.points)) return false;
   }
-  for (let i = 0; i < 4; i++) {
-    const c1 = corners[i], c2 = corners[(i + 1) % 4];
-    if (!isPointInPolygon({ x: (c1.x + c2.x) * 0.5, y: (c1.y + c2.y) * 0.5 }, sheetPoly)) return false;
-    for (let j = 0; j < sheetPoly.length; j++) {
-      if (segmentsIntersectExact(c1, c2, sheetPoly[j], sheetPoly[(j + 1) % sheetPoly.length])) return false;
-    }
-  }
-
-  for (const obs of obstacles) {
-    if (
-      r.x + r.width <= obs.minX + 0.5 ||
-      obs.maxX <= r.x + 0.5 ||
-      r.y + r.height <= obs.minY + 0.5 ||
-      obs.maxY <= r.y + 0.5
-    ) {
-      continue;
-    }
-    const obsPts = obs.points;
-    for (const c of corners) {
-      if (isPointInPolygon(c, obsPts)) return false;
-    }
-    for (const op of obsPts) {
-      if (op.x > r.x + 0.5 && op.x < r.x + r.width - 0.5 && op.y > r.y + 0.5 && op.y < r.y + r.height - 0.5) {
-        return false;
-      }
-    }
-    for (let i = 0; i < 4; i++) {
-      const c1 = corners[i], c2 = corners[(i + 1) % 4];
-      if (isPointInPolygon({ x: (c1.x + c2.x) * 0.5, y: (c1.y + c2.y) * 0.5 }, obsPts)) return false;
-      for (let j = 0; j < obsPts.length; j++) {
-        if (segmentsIntersectExact(c1, c2, obsPts[j], obsPts[(j + 1) % obsPts.length])) return false;
-      }
-    }
-  }
-
   return true;
+}
+
+/** Algum segmento do anel toca o retângulo alinhado [x0,x1]×[y0,y1]? (recorte de Liang–Barsky) */
+function ringTouchesBox(ring, bx) {
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    if (segmentTouchesBox(ring[j].x, ring[j].y, ring[i].x, ring[i].y, bx)) return true;
+  }
+  return false;
+}
+function segmentTouchesBox(x1, y1, x2, y2, bx) {
+  let t0 = 0, t1 = 1;
+  const dx = x2 - x1, dy = y2 - y1;
+  const clip = (p, q) => {
+    if (p === 0) return q >= 0;
+    const t = q / p;
+    if (p < 0) { if (t > t1) return false; if (t > t0) t0 = t; }
+    else { if (t < t0) return false; if (t < t1) t1 = t; }
+    return true;
+  };
+  return clip(-dx, x1 - bx.x0) && clip(dx, bx.x1 - x1) && clip(-dy, y1 - bx.y0) && clip(dy, bx.y1 - y1) && t0 <= t1;
 }
 
 function expandRectangleToLimits(rect, placedParts, existingRemnants, customSheet) {
@@ -716,13 +719,19 @@ function expandRectangleToLimits(rect, placedParts, existingRemnants, customShee
   return r;
 }
 
+/** Arredonda o retalho a 0,1 mm PARA DENTRO (nunca invade a folga por arredondamento). */
+function roundRemnantInward(b) {
+  const x0 = Math.ceil(b.x * 10 - 1e-6) / 10, y0 = Math.ceil(b.y * 10 - 1e-6) / 10;
+  const x1 = Math.floor((b.x + b.width) * 10 + 1e-6) / 10, y1 = Math.floor((b.y + b.height) * 10 + 1e-6) / 10;
+  return { x: x0, y: y0, width: +(x1 - x0).toFixed(1), height: +(y1 - y0).toFixed(1) };
+}
+
 function extractStandardRemnants(placedParts, customSheet, minRemnantSize, opts = {}) {
   let freeRects = BASE_SHEET_FREE_RECTS.map(r => ({ ...r }));
 
   for (const p of placedParts) {
     if (p.nestedInsideHole) continue;
-    const solidBoxes = getSolidBoxesForPart(p, NOMINAL_PART_GAP);
-    for (const box of solidBoxes) {
+    for (const box of getRemnantBlockBoxes(p, NOMINAL_PART_GAP)) {
       freeRects = subtractBoxFromFreeRects(freeRects, box);
     }
   }
@@ -736,12 +745,13 @@ function extractStandardRemnants(placedParts, customSheet, minRemnantSize, opts 
     while (pool.length > 0) {
       pool.sort((a, b) => (b.width * b.height) - (a.width * a.height));
       const b = pool[0];
-      const w = +b.width.toFixed(1), h = +b.height.toFixed(1);
+      const rr = roundRemnantInward(b);
+      const w = rr.width, h = rr.height;
       const isSq = Math.abs(w - h) <= Math.max(w, h) * 0.12;
       fastOut.push({
         id: `RET_${fastOut.length + 1}`,
         label: isSq ? `Quadrado #${fastOut.length + 1}` : `Retalho #${fastOut.length + 1}`,
-        x: +b.x.toFixed(1), y: +b.y.toFixed(1), width: w, height: h, area: +(w * h).toFixed(1)
+        x: rr.x, y: rr.y, width: w, height: h, area: +(w * h).toFixed(1)
       });
       pool = subtractBoxFromFreeRects(pool, b).filter(r => r.width >= minRemnantSize && r.height >= minRemnantSize);
     }
@@ -810,14 +820,15 @@ function extractStandardRemnants(placedParts, customSheet, minRemnantSize, opts 
       continue;
     }
 
-    const w = +bestExpanded.width.toFixed(1), h = +bestExpanded.height.toFixed(1);
+    const rr = roundRemnantInward(bestExpanded);
+    const w = rr.width, h = rr.height;
     const isSq = Math.abs(w - h) <= Math.max(w, h) * 0.12;
 
     remnants.push({
       id: `RET_${remnants.length + 1}`,
       label: isSq ? `Quadrado #${remnants.length + 1}` : `Retalho #${remnants.length + 1}`,
-      x: +bestExpanded.x.toFixed(1),
-      y: +bestExpanded.y.toFixed(1),
+      x: rr.x,
+      y: rr.y,
       width: w,
       height: h,
       area: +(w * h).toFixed(1)
@@ -894,7 +905,7 @@ function findBestPlacement(part, tryAngles, candidatePositions, placedParts, pla
       id: part.id, x: c.px, y: c.py, angle: c.ang, placedWidth: c.w, placedHeight: c.h,
       area: part.area, bboxArea: part.bboxArea, points: part.points, placedPoints: c.rotData.pts
     };
-    const nearbyPlaced = placedRTree.search({ minX: c.px, minY: c.py, maxX: c.px + c.w, maxY: c.py + c.h });
+    const nearbyPlaced = placedRTree.search({ minX: c.px - QUERY_PAD, minY: c.py - QUERY_PAD, maxX: c.px + c.w + QUERY_PAD, maxY: c.py + c.h + QUERY_PAD });
     if (nearbyPlaced.some(other => polygonsCollideTrueShape(tempPart, other, NOMINAL_PART_GAP))) continue;
     return { x: c.px, y: c.py, w: c.w, h: c.h, reqW: c.reqW, reqH: c.reqH, ang: c.ang, rotData: c.rotData };
   }
@@ -965,7 +976,7 @@ function upgradeToFull(res) {
   res._fastSnap = {
     placedParts: res.placedParts, usedArea: res.usedArea, compactUtilization: res.compactUtilization,
     largestRemnantArea: res.largestRemnantArea, boundingBoxArea: res.boundingBoxArea,
-    gravityCenterTerm: res.gravityCenterTerm, remnantArea: res.remnantArea
+    gravityCenterTerm: res.gravityCenterTerm, remnantArea: res.remnantArea, stripLength: res.stripLength
   };
   const hosts = res.placedParts.filter(p => !p.nestedInsideHole);
   applyRemnantMetrics(res, extractStandardRemnants(hosts, sheet, params.min_remnant_size, { fast: false }));
@@ -1106,6 +1117,8 @@ function decodeCandidateBLF(orderedParts, heuristic, forcedAngles, gravityDir) {
     usedArea: +usedArea.toFixed(2),
     sheetArea: +sheetArea.toFixed(2),
     boundingBoxArea: +(maxX * maxY).toFixed(1),
+    // comprimento usado da faixa (objetivo MIN_STRIP_LENGTH): maior X ocupado por peça, sem margem
+    stripLength: +placedParts.reduce((m, p) => Math.max(m, p.x + p.placedWidth), 0).toFixed(4),
     gravityCenterTerm: +(weightedGravitySum / Math.max(1, usedArea)).toFixed(2),
     inHoleCount,
     freeHoleSlugsCount,
@@ -1135,6 +1148,11 @@ function compareSolutions(cand, best, goal) {
     }
     return cand.compactUtilization - best.compactUtilization;
   }
+  if (goal === 'MIN_STRIP_LENGTH') {
+    // strip packing (benchmark público): altura fixa, minimizar o comprimento usado
+    if (Math.abs(cand.stripLength - best.stripLength) > 1e-6 * SHEET_W) return best.stripLength - cand.stripLength;
+    return best.gravityCenterTerm - cand.gravityCenterTerm;
+  }
   if (goal === 'MIN_BOUNDING_BOX') {
     if (Math.abs(cand.boundingBoxArea - best.boundingBoxArea) > 1) {
       return best.boundingBoxArea - cand.boundingBoxArea;
@@ -1161,6 +1179,9 @@ function scalarFitness(res) {
   const sa = Math.max(1, res.sheetArea);
   if (params.optimization_goal === 'MAX_SINGLE_REMNANT') {
     return base + (m.largestRemnantArea / sa) * 100 + m.compactUtilization * 0.01;
+  }
+  if (params.optimization_goal === 'MIN_STRIP_LENGTH') {
+    return base + (1 - m.stripLength / Math.max(1, SHEET_W)) * 100;
   }
   if (params.optimization_goal === 'MIN_BOUNDING_BOX') {
     return base - (m.boundingBoxArea / Math.max(1, SHEET_W * SHEET_H)) * 100 + m.compactUtilization * 0.01;
