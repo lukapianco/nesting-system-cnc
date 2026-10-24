@@ -81,6 +81,39 @@ function naivePartCount(dxf) {
       checkLayout(r);
     });
 
+    await test('cancelar o job (fechar o stream, como ao trocar peça/chapa na tela) encerra o processo do sparrow', async () => {
+      const http = require('http');
+      const { execSync } = require('child_process');
+      // processos vivos (um zumbi já encerrado, à espera de ser recolhido, não consome CPU e não conta)
+      const count = () => Number(execSync("ps -eo stat=,comm= | grep -v '^Z' | grep -c 'prumo-sparrow' || true").toString().trim());
+      const zombies = () => Number(execSync("ps -eo stat=,comm= | grep '^Z' | grep -c 'prumo-sparrow' || true").toString().trim());
+      const before = count(), zBefore = zombies();
+      const express = require('express');
+      const orig = express.application.listen;
+      let server;
+      express.application.listen = function () { server = orig.call(this, 0, () => {}); return server; };
+      delete require.cache[require.resolve('../index.js')];
+      require('../index.js');
+      express.application.listen = orig;
+      await new Promise(r => (server.listening ? r() : server.once('listening', r)));
+      const base = `http://127.0.0.1:${server.address().port}`;
+      const post = async (p, body) => (await fetch(base + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+      const fd = new FormData();
+      fd.append('dxfFile', new Blob([require('../presets').buildSampleDxf('trueshape')]), 'trueshape.dxf');
+      const up = await (await fetch(base + '/api/upload-dxf', { method: 'POST', body: fd })).json();
+      const job = await post('/api/start-job', { uploadId: up.uploadId, config: { ...BIG, engine: 'SPARROW', external_time_s: 60 } });
+      const req = http.get(`${base}/api/stream/${job.jobId}`);
+      await new Promise(r => setTimeout(r, 2500));
+      const during = count();
+      req.destroy();
+      await new Promise(r => setTimeout(r, 1500));
+      const after = count(), zAfter = zombies();
+      server.close();
+      assert(during > before, `o sparrow não chegou a rodar (${before} → ${during})`);
+      assert.strictEqual(after, before, `processo do sparrow continuou rodando depois do cancelamento (${after} > ${before})`);
+      assert.strictEqual(zAfter, zBefore, 'o cancelamento deixou um processo zumbi (o worker não recolheu o filho)');
+    });
+
     await test('lote maior que a chapa: volta para o motor clássico e explica o motivo', async () => {
       const r = await runPreset({ parts: 'icamento', qty: 12, config: { ...SMALL, engine: 'AUTO' }, hardware: HW });
       assert.strictEqual(r.done.engine, 'CLASSICO');
@@ -88,11 +121,23 @@ function naivePartCount(dxf) {
       checkLayout(r);
     });
 
-    await test('chapa desenhada (irregular): motor clássico com aviso', async () => {
-      const r = await runPreset({ parts: 'trueshape', sheet: 'sheet_stepped', qty: 1, config: { ...BIG, engine: 'AUTO' }, hardware: HW });
-      assert.strictEqual(r.done.engine, 'CLASSICO');
-      assert(/chapa desenhada/.test(r.done.engineNote || ''), `nota: ${r.done.engineNote}`);
-      checkLayout(r);
+    for (const [parts, sheet, qty] of [['trueshape', 'sheet_stepped', 1], ['industrial', 'sheet_ramp_hole', 1], ['icamento', 'sheet_ramp_hole', 3]]) {
+      await test(`chapa desenhada ${sheet} (${parts} ×${qty}): sparrow com contorno e furos da chapa como obstáculos, layout válido`, async () => {
+        const r = await runPreset({ parts, sheet, qty, config: { ...BIG, engine: 'AUTO' }, hardware: HW });
+        assert.strictEqual(r.done.engine, 'SPARROW', `motor usado: ${r.done.engine} (${r.done.engineNote})`);
+        const b = checkLayout(r);
+        assert.strictEqual(b.unplacedParts.length, 0);
+        assert(b.sheetPoly && b.sheetPoly.length > 3, 'layout sem o contorno da chapa');
+      });
+    }
+
+    await test('Modelo 3: chapa já usada desenhada junto vira a chapa (5 recortes) e os 12 anéis entram nela', async () => {
+      const txt = require('fs').readFileSync(require('path').join(__dirname, 'fixtures', 'Modelo_3_s_moldura.dxf'));
+      const r = await runPreset({ dxfText: txt, qty: 1, importOptions: { sheetContour: 'CHAPA_1' }, config: { ...BIG, sheetWidth: 3000, sheetHeight: 1200, engine: 'AUTO', external_time_s: 6 }, hardware: HW });
+      assert.strictEqual(r.done.engine, 'SPARROW', `motor usado: ${r.done.engine} (${r.done.engineNote})`);
+      const b = checkLayout(r);
+      assert.strictEqual(b.placedParts.length, 12);
+      assert.strictEqual((b.sheetObstacles || []).length, 5, 'recortes da chapa');
     });
   }
 

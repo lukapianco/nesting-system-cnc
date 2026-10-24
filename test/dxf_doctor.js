@@ -308,6 +308,28 @@ function maxDeviation(samples, ring) {
     // gomo: largura ~94,5 mm, altura ~380,6 mm (medida no CAD a partir do desenho)
     near(Math.min(cat.catalogParts[0].width, cat.catalogParts[0].height), 94.529, 0.01, 'largura do gomo');
   });
+  await test('Modelo 3: chapa usada 3000×1200 com 5 recortes desenhada junto com 12 anéis é sugerida, e só vira chapa quando escolhida', () => {
+    const txt = FIX('Modelo_3_s_moldura.dxf');
+    const cat = buildCatalogFromDxf(parseDxf(txt), cfg(), {});
+    const cands = cat.report.sheetCandidates || [];
+    assert.strictEqual(cands.length, 1, JSON.stringify(cands));
+    assert.deepStrictEqual([Math.round(cands[0].width), Math.round(cands[0].height), cands[0].cutouts, cands[0].chosen], [3000, 1200, 5, false]);
+    assert(codes(cat.report).includes('SHEET_CANDIDATE'));
+    assert.strictEqual(cat.drawnSheet, null, 'sem escolha, nada vira chapa');
+    const chosen = buildCatalogFromDxf(parseDxf(txt), cfg(), { sheetContour: cands[0].id });
+    assert(chosen.drawnSheet && chosen.drawnSheet.isCustomDxf !== false, 'chapa desenhada ausente');
+    assert.deepStrictEqual(chosen.catalogParts.map(p => p.quantity_detected), [12]);
+    assert(codes(chosen.report).includes('SHEET_FROM_DRAWING'));
+  });
+  await test('sem falso positivo de chapa usada nos Modelos 1 e 2 (com e sem moldura)', () => {
+    for (const f of ['Modelo_1_c_moldura.dxf', 'Modelo_2_c_moldura.dxf', 'Modelo_2_s_moldura.dxf']) {
+      const cat = buildCatalogFromDxf(parseDxf(FIX(f)), cfg(), {});
+      assert.strictEqual((cat.report.sheetCandidates || []).length, 0, f);
+    }
+    const s2 = buildCatalogFromDxf(parseDxf(FIX('Modelo_2_s_moldura.dxf')), cfg(), {});
+    assert.deepStrictEqual(s2.catalogParts.map(p => p.quantity_detected), [87], 'Modelo 2 sem moldura: 87 gomos');
+    assert.strictEqual(s2.frames.length, 0);
+  });
   await test('Modelo 1 pelo motor: layout validado, nenhuma peça perdida', async () => {
     const r = await runPreset({ dxfText: FIX('Modelo_1_c_moldura.dxf'), qty: 1,
       config: { sheetWidth: 2000, sheetHeight: 1200, kerf_width: 0.4, part_clearance: 5.6, sheet_margin: 6, total_iterations: 50, min_remnant_size: 100 } });

@@ -11,13 +11,16 @@ Serve para laser, plasma, oxicorte, jato d'água e router.
 
 O escopo é **só o nesting**. Estoque de chapas, ordens de serviço e rastreio de sobras ficam no sistema de gestão, que conversa com o Prumo pela API.
 
-> Versão atual: **5.5** — veja o [CHANGELOG](CHANGELOG.md).
+> Versão atual: **5.6** — veja o [CHANGELOG](CHANGELOG.md).
+> Manual de operação: [`docs/Manual_Prumo.md`](docs/Manual_Prumo.md).
+> Decisões técnicas: [`docs/adr/`](docs/adr).
+
 ## O que ele faz
 
 | Área | O que o Prumo entrega |
 |---|---|
-| **Leitura de DXF** ("DXF Doctor") | Lê blocos aninhados e matrizes, elipses, splines, polilinhas com arco, unidades (`$INSUNITS`) e camadas auxiliares (cota, texto, eixo…). Costura linhas soltas e fecha aberturas pequenas, sempre avisando onde. Detecta a moldura (a chapa desenhada em volta das peças) e transforma cópias idênticas em quantidade. Cada problema vem num relatório com a coordenada. |
-| **Encaixe** | Dois motores. O **otimizador sparrow** (padrão quando instalado) minimiza a sobreposição e comprime as peças contra uma ponta da chapa. O **motor clássico** (BRKGA + BLF) atende chapa desenhada e lote maior que a chapa. Os dois giram as peças conforme a restrição de fibra. O Part-in-Part (peça dentro do furo de outra) vale nos dois. |
+| **Leitura de DXF** ("DXF Doctor") | Lê blocos aninhados e matrizes, elipses, splines, polilinhas com arco, unidades (`$INSUNITS`) e camadas auxiliares (cota, texto, eixo…). Costura linhas soltas e fecha aberturas pequenas, sempre avisando onde. Detecta a moldura (a chapa desenhada em volta das peças) e a chapa já usada desenhada junto com as peças (contorno grande com recortes), e transforma cópias idênticas em quantidade. Cada problema vem num relatório com a coordenada. |
+| **Encaixe** | Dois motores. O **otimizador sparrow** (padrão quando instalado) minimiza a sobreposição e comprime as peças contra uma ponta da chapa. Desde a V5.6 ele também trabalha em chapa desenhada (irregular, com recortes e defeitos). O **motor clássico** (BRKGA + BLF) atende lote maior que a chapa e serve de reserva. Os dois giram as peças conforme a restrição de fibra. O Part-in-Part (peça dentro do furo de outra) vale nos dois. |
 | **Validação independente** | Todo layout passa por um validador que não usa código do motor. Ele confere sobreposição, folga entre peças, margem e furos da chapa, filhas dentro do furo, retalhos, ângulo de fibra e perfuração em sucata. Layout reprovado não é exportado. |
 | **Retalhos** | Retângulos úteis na sobra, com a mesma folga das peças, para ir para o estoque. |
 | **CAM** | Ordem de corte de dentro para fora, lead-in em arco ou reta, perfuração conferida em sucata e deslocamentos G00. |
@@ -46,30 +49,25 @@ Se o executável estiver em outro lugar, aponte com a variável de ambiente `PRU
 
 ## Como usar (bancada de testes)
 
-1. **Peças:** envie o `.dxf` ou carregue um dos exemplos. O painel *Diagnóstico do DXF* mostra o que foi lido, o que foi ignorado e por quê.
-2. **Chapa:** informe largura × altura, ou envie o DXF de uma chapa irregular. Se o desenho tiver moldura, a chapa já vem ajustada.
-3. **Parâmetros:**
-   - processo e espessura (sugerem kerf e folgas);
-   - margem;
-   - fibra;
-   - modo de qualidade (define o tempo de busca);
-   - motor (Automático, sparrow ou clássico).
-4. **Resultado:**
-   - acompanhe o melhor layout ao vivo;
-   - **Parar e manter o melhor** encerra quando quiser;
-   - compare as alternativas;
-   - baixe o **DXF de corte** ou o **DXF dos retalhos**.
+A tela tem três colunas: os passos à esquerda, a mesa (o layout na chapa, com régua em mm) no meio e o resultado à direita.
+
+1. **Peças:** arraste o `.dxf` para a tela ou abra um dos exemplos. O diagnóstico mostra o que foi lido, o que foi ignorado e por quê.
+2. **Chapa:** informe comprimento × largura, ou use uma chapa desenhada em DXF. Se o desenho tiver moldura, a chapa já vem ajustada; se tiver uma chapa usada desenhada junto, a tela oferece usá-la.
+3. **Corte:** processo e espessura (sugerem kerf e folgas), margem, giro das peças.
+4. **Busca:** tempo de busca e motor (Automático, sparrow ou clássico).
+
+O cálculo começa sozinho e recomeça quando a entrada muda (o anterior é parado no servidor). **Parar e manter o melhor** encerra quando quiser. À direita ficam o aproveitamento, a validação, os botões **Baixar DXF de corte** e **Baixar DXF dos retalhos** e o uso do servidor, atualizado a cada 2 s.
 
 ## API
 
 | Método | Rota | Para quê |
 |---|---|---|
-| `GET` | `/api/hardware` | CPU, workers, fila e se o otimizador sparrow está instalado |
-| `POST` | `/api/upload-dxf` | Lê o DXF de peças (`multipart`, campo `dxfFile`) e devolve peças, furos, cópias, molduras e diagnóstico |
-| `POST` | `/api/reanalyze-dxf` | Relê o último arquivo com outras opções de importação (camadas, moldura, unidade) |
+| `GET` | `/api/hardware` | CPU, workers, fila, uso medido (`usage`: CPU total e por núcleo, memória, cálculos rodando) e se o otimizador sparrow está instalado e rodando |
+| `POST` | `/api/upload-dxf` | Lê o DXF de peças (`multipart`, campo `dxfFile`) e devolve peças, furos, cópias, molduras, candidatos a chapa usada (`sheetCandidates`) e diagnóstico |
+| `POST` | `/api/reanalyze-dxf` | Relê o último arquivo com outras opções de importação (camadas, moldura, unidade, `sheetContour` para usar um contorno como chapa) |
 | `POST` | `/api/upload-sheet-dxf` | Lê o DXF de uma chapa irregular (com furos/defeitos) |
 | `POST` | `/api/start-job` | Cria o job (`uploadId`, `config`, `quantities`) e devolve o `jobId` |
-| `GET` | `/api/stream/:jobId` | Progresso em tempo real (SSE): `queued`, `progress`, `done`, `error` |
+| `GET` | `/api/stream/:jobId` | Progresso em tempo real (SSE): `queued`, `progress`, `done`, `error`. Fechar a conexão cancela o job e o processo do otimizador |
 | `POST` | `/api/stop/:jobId` | Para e entrega o melhor layout já validado |
 | `GET` | `/api/process-profiles`, `/api/recommend-params` | Perfis de processo e parâmetros sugeridos |
 | `POST` | `/api/export-dxf` | DXF de corte (opções de camadas no corpo) |

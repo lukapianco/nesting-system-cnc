@@ -91,7 +91,12 @@ impl<'a> CollisionLossEvaluator<'a> {
                 quantify_collision_poly_container(shape, self.layout.container().outer_cd().bbox())
                     * self.ct.get_container_weight(self.current_pk),
             ),
-            _ => unimplemented!("unsupported hazard entity"),
+            // Prumo: obstáculo fixo da chapa (ver quantify/tracker.rs)
+            BasicHazardEntity::Hole { .. } | BasicHazardEntity::InferiorQualityZone { .. } => {
+                let hz = crate::quantify::tracker::static_hazard_shape(self.layout, &hazard);
+                let loss = crate::quantify::quantify_collision_poly_poly(hz, shape) * self.ct.get_container_weight(self.current_pk);
+                (loss <= max_loss).then_some(loss)
+            }
         }
     }
 }

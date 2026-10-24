@@ -13,3 +13,5 @@ pub use problem::SPProblem;
 pub use solution::SPSolution;
 #[doc(inline)]
 pub use strip::Strip;
+#[doc(inline)]
+pub use strip::PRUMO_STRIP_OBSTACLES;

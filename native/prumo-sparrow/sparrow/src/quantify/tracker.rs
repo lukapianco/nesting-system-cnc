@@ -76,9 +76,15 @@ impl CollisionTracker {
                 BasicHazardEntity::Exterior => {
                     let loss = quantify_collision_poly_container(shape, l.container().outer_cd().bbox());
                     assert!(loss > 0.0, "loss for a collision should be > 0.0");
-                    self.container_collisions[idx].loss = loss;
+                    self.container_collisions[idx].loss += loss;
                 }
-                _ => unimplemented!("unsupported hazard entity"),
+                // Prumo: obstáculos fixos da chapa (furos, área fora do contorno) somam na perda "item × contêiner",
+                // com a mesma medida de sobreposição por polos usada entre itens
+                BasicHazardEntity::Hole { .. } | BasicHazardEntity::InferiorQualityZone { .. } => {
+                    let loss = quantify_collision_poly_poly(shape, static_hazard_shape(l, haz));
+                    assert!(loss > 0.0, "loss for a collision should be > 0.0");
+                    self.container_collisions[idx].loss += loss;
+                }
             }
         }
     }
@@ -198,6 +204,16 @@ impl CollisionTracker {
 
         cont_w_o + pair_w_o
     }
+}
+
+/// Prumo: contorno de um obstáculo fixo (zona de qualidade do contêiner) a partir da entidade do jagua-rs.
+pub fn static_hazard_shape<'a>(l: &'a Layout, haz: &BasicHazardEntity) -> &'a jagua_rs::geometry::primitives::SPolygon {
+    let (quality, idx) = match *haz {
+        BasicHazardEntity::Hole { idx } => (0, idx),
+        BasicHazardEntity::InferiorQualityZone { quality, idx } => (quality, idx),
+        _ => unreachable!("não é obstáculo fixo"),
+    };
+    l.container().quality_zones()[quality].as_ref().expect("zona de qualidade inexistente").shapes_cd()[idx].as_ref()
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -26,6 +26,7 @@ const DEFAULT_IMPORT = {
   includeLayers: null,    // se informado, SÓ estas layers entram
   onlyFrames: null,       // ids de molduras: só as peças dentro delas entram
   forceLayers: [],        // layers que entram mesmo se a regra automática as excluiria (oculta, tracejada, auxiliar)
+  sheetContour: null,     // id de um candidato a chapa (ex.: "CHAPA_1"): sai das peças e vira a chapa (com os recortes)
   minFeature: 0.5         // mm: contornos com largura E altura menores que isto são ruído
 };
 
@@ -58,6 +59,7 @@ function normalizeImportOptions(o = {}) {
   r.includeDashed = !!r.includeDashed;
   r.includeHiddenLayers = !!r.includeHiddenLayers;
   r.forceLayers = Array.isArray(r.forceLayers) ? r.forceLayers.map(String) : [];
+  r.sheetContour = typeof r.sheetContour === 'string' && r.sheetContour ? r.sheetContour : null;
   return r;
 }
 
@@ -150,6 +152,8 @@ function isSimpleHoleShape(r) {
   return close(L * W) || close((L - W) * W + Math.PI * W * W / 4) || close(Math.PI * L * W / 4);
 }
 
+// Formatos comerciais de chapa (mm), nos dois sentidos: aço/inox/alumínio e painéis de madeira/MDF
+const STANDARD_SHEETS = [[1000, 2000], [1220, 2440], [1250, 2500], [1200, 3000], [1500, 3000], [1525, 3050], [1500, 6000], [2000, 6000], [1830, 2750], [1850, 2750], [1830, 2440]];
 const FRAME_LAYER_RE = /(moldura|chapa|sheet|frame|border|borda|limite|formato|retalho|stock|plate)/i;
 const FRAME_TEXT_RE = /(chapa|sheet|\d+([.,]\d+)?\s*[x×]\s*\d+([.,]\d+)?\s*(m|mm)?\b|#\s*\d|esp\.?|espessura|aisi|inox|a[çc]o|alum)/i;
 
@@ -353,8 +357,48 @@ function analyzeDxf(doc, geom = {}, importOptions = {}) {
       `Tratada como contorno da chapa, não como peça${f.labels.length ? ` — rótulo: "${f.labels.join(' / ').replace(/\n/g, ' ')}"` : ''}.`);
   }
 
+  // ---- 7b. chapa já usada desenhada junto (ex.: 3000 × 1200 com os recortes de um corte anterior e, FORA dela, as
+  //          peças novas). Sinais: contorno de nível 0 sem peças dentro (só furos), muito maior que todo o resto, e as
+  //          outras peças cabem na caixa dele. Não é decidido sozinho: o usuário escolhe "usar como chapa".
+  const sheetCandidates = [];
+  if (opt.frameMode === 'auto') {
+    const tops = rings.filter(r => r.depth === 0 && !frameIdx.has(r.idx));
+    for (const r of tops) {
+      if (!r.children.length || r.children.some(ci => rings[ci].children.length)) continue;
+      const others = tops.filter(o => o !== r);
+      if (!others.length) continue;
+      const othersArea = others.reduce((s, o) => s + o.absArea, 0);
+      const w = r.bb.maxX - r.bb.minX, h = r.bb.maxY - r.bb.minY;
+      const fits = others.every(o => {
+        const ow = o.bb.maxX - o.bb.minX, oh = o.bb.maxY - o.bb.minY;
+        return (ow <= w && oh <= h) || (ow <= h && oh <= w);
+      });
+      const holesArea = r.children.reduce((s, ci) => s + rings[ci].absArea, 0);
+      // recortes com forma de peça (não furos redondos/retangulares) ou formato comercial de chapa
+      const shaped = r.children.filter(ci => !isSimpleHoleShape(rings[ci].pts)).length / r.children.length >= 0.5;
+      const standard = STANDARD_SHEETS.some(([a, b]) => (Math.abs(w - a) <= 2 && Math.abs(h - b) <= 2) || (Math.abs(w - b) <= 2 && Math.abs(h - a) <= 2));
+      if (r.absArea >= 1.5 * othersArea && fits && holesArea < 0.8 * r.absArea && (shaped || standard)) {
+        sheetCandidates.push({ id: `CHAPA_${sheetCandidates.length + 1}`, ringIdx: r.idx, width: +w.toFixed(3), height: +h.toFixed(3), cutouts: r.children.length, rectangular: isAxisRectangle(r.pts, r.bb) });
+      }
+    }
+  }
+  const chosenSheet = opt.sheetContour ? sheetCandidates.find(c => c.id === opt.sheetContour) : null;
+  for (const c of sheetCandidates) {
+    if (c === chosenSheet) add('info', 'SHEET_FROM_DRAWING', `Contorno ${c.width.toFixed(0)} × ${c.height.toFixed(0)} mm com ${c.cutouts} recorte(s) usado como chapa (os recortes são áreas já cortadas). As outras peças vão ser encaixadas nele.`);
+    else add('medio', 'SHEET_CANDIDATE', `O contorno ${c.width.toFixed(0)} × ${c.height.toFixed(0)} mm com ${c.cutouts} recorte(s) parece uma chapa já usada (as outras peças cabem nele e ele é muito maior que elas). Foi tratado como peça; escolha "usar como chapa" para encaixar as peças nele.`);
+  }
+  let drawnSheet = null;
+  const sheetRingIdx = new Set();
+  if (chosenSheet) {
+    const r = rings[chosenSheet.ringIdx];
+    sheetRingIdx.add(r.idx);
+    r.children.forEach(ci => sheetRingIdx.add(ci));
+    const toC = (rr) => { const bbox = getBoundingBox(rr.pts); return { points: rr.pts.map(p => ({ x: p.x, y: p.y })), bbox, trueArea: rr.absArea }; };
+    drawnSheet = { id: chosenSheet.id, contours: [toC(r), ...r.children.map(ci => toC(rings[ci]))] };
+  }
+
   // filtro por moldura escolhida
-  let keep = rings.filter(r => !frameIdx.has(r.idx));
+  let keep = rings.filter(r => !frameIdx.has(r.idx) && !sheetRingIdx.has(r.idx));
   if (opt.onlyFrames && frames.length) {
     const chosen = new Set(frames.filter(f => opt.onlyFrames.includes(f.id)).map(f => f.ringIdx));
     const under = (r) => { let p = r.parent; while (p >= 0) { if (chosen.has(p)) return true; p = rings[p].parent; } return false; };
@@ -460,6 +504,7 @@ function analyzeDxf(doc, geom = {}, importOptions = {}) {
       excludedBecause: [...l.reasons]
     })),
     frames: frames.map(f => ({ id: f.id, width: f.width, height: f.height, partContours: f.partContours, labels: f.labels, reasons: f.reasons })),
+    sheetCandidates: sheetCandidates.map(({ ringIdx, ...c }) => ({ ...c, chosen: !!(chosenSheet && c.id === chosenSheet.id) })),
     items,
     importOptions: opt,
     ok: !items.some(i => i.severity === 'erro')
@@ -467,6 +512,7 @@ function analyzeDxf(doc, geom = {}, importOptions = {}) {
 
   contours.report = report;
   contours.frames = frames;
+  contours.drawnSheet = drawnSheet;
   contours.warnings = items.filter(i => SEVERITY_ORDER[i.severity] <= SEVERITY_ORDER.medio).map(i => i.message);
   return contours;
 }

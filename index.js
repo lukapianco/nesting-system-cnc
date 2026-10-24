@@ -54,6 +54,29 @@ const pendingJobs = new Map();      // jobId -> { ..., createdAt }
 const liveJobs = new Map();         // jobId -> job (na fila ou rodando): permite "Parar e manter o melhor"
 const uploadCache = new Map();      // uploadId -> { parsed, createdAt }  (evita reenviar contornos a cada job)
 const jobsByIp = new Map();
+// processos do otimizador externo por job: terminar o worker NÃO encerra o processo filho (ele foi criado dentro do
+// worker); o servidor encerra explicitamente quando o job é cancelado, trocado ou termina
+const childProcesses = new Map();   // pid -> jobId
+/** Cancela o job: o worker com otimizador externo encerra o processo filho e sai sozinho; o motor clássico (laço
+ *  síncrono) não lê mensagens, então o worker é terminado depois de um curto prazo de qualquer jeito. */
+function cancelWorker(job) {
+  const w = job.worker;
+  if (!w) return;
+  if (job.childPids && job.childPids.size) {
+    try { w.postMessage({ type: 'cancel' }); } catch (_) { /* já saiu */ }
+    setTimeout(() => { w.terminate(); killJobChildren(job); }, 1500).unref();
+  } else {
+    w.terminate();
+  }
+}
+
+function killJobChildren(job) {
+  for (const pid of job.childPids || []) {
+    try { process.kill(pid, 'SIGKILL'); } catch (_) { /* já terminou */ }
+    childProcesses.delete(pid);
+  }
+  if (job.childPids) job.childPids.clear();
+}
 const MAX_JOBS_PER_IP = 3;
 const PENDING_TTL_MS = 2 * 60 * 1000;
 const UPLOAD_TTL_MS = 60 * 60 * 1000;
@@ -92,11 +115,11 @@ function parseImportOptions(raw) {
 /** Monta a resposta de catálogo (upload e reanálise) a partir do DXF lido. */
 function catalogResponse(uploadId, parsed, tol, importOptions, configRaw) {
   const config = normalizeNestingParams({ ...(configRaw || {}), chordal_tolerance: tol });
-  const { catalogParts, report, frames, warnings } = buildCatalogFromDxf(parsed, config, importOptions);
+  const { catalogParts, report, frames, warnings, drawnSheet } = buildCatalogFromDxf(parsed, config, importOptions);
   const suggestedSheet = frames.length
     ? { width: frames[0].width, height: frames[0].height, source: frames[0].id, labels: frames[0].labels }
     : null;
-  return { uploadId, contourCount: report.summary.closedContours, catalogParts, warnings, report, frames: report.frames, suggestedSheet };
+  return { uploadId, contourCount: report.summary.closedContours, catalogParts, warnings, report, frames: report.frames, suggestedSheet, sheetCandidates: report.sheetCandidates || [], drawnSheet };
 }
 
 // =========================================================
@@ -113,7 +136,7 @@ function enqueueJob(job, res) {
     clearInterval(heartbeat);
     if (job.jobId) liveJobs.delete(job.jobId);
     job.aborted = true;
-    if (job.worker) job.worker.terminate();
+    cancelWorker(job);
     if (job.ip) jobsByIp.set(job.ip, Math.max(0, (jobsByIp.get(job.ip) || 1) - 1));
   });
 
@@ -148,6 +171,13 @@ function runWorker(job) {
   job.worker = worker;
 
   worker.on('message', (msg) => {
+    if (msg.type === 'child') { // pid do otimizador externo (interno: não vai para a tela)
+      (job.childPids = job.childPids || new Set()).add(msg.pid);
+      childProcesses.set(msg.pid, job.jobId);
+      if (job.aborted) cancelWorker(job);
+      return;
+    }
+    if (msg.type === 'child-exit') { if (job.childPids) job.childPids.delete(msg.pid); childProcesses.delete(msg.pid); return; }
     if (!job.aborted) {
       job.res.write(`data: ${JSON.stringify({
         ...msg,
@@ -167,6 +197,7 @@ function runWorker(job) {
   });
 
   worker.on('exit', () => {
+    killJobChildren(job);
     if (job.jobId) liveJobs.delete(job.jobId);
     activeWorkers = Math.max(0, activeWorkers - 1);
     checkQueue();
@@ -183,10 +214,37 @@ function checkQueue() {
 // =========================================================
 // 3. ROTAS HTTP + STREAM SSE
 // =========================================================
+// Uso de CPU medido aqui (diferença dos tempos de os.cpus() a cada segundo): o painel da tela mostra o servidor
+// trabalhando de verdade, não só a configuração.
+let cpuSample = { at: Date.now(), times: os.cpus().map(c => ({ ...c.times })) };
+let cpuUsage = { total: 0, perCore: [] };
+setInterval(() => {
+  const now = os.cpus().map(c => ({ ...c.times }));
+  const per = now.map((t, i) => {
+    const p = cpuSample.times[i] || t;
+    const busy = (t.user - p.user) + (t.nice - p.nice) + (t.sys - p.sys) + (t.irq - p.irq);
+    const all = busy + (t.idle - p.idle);
+    return all > 0 ? Math.round((busy / all) * 100) : 0;
+  });
+  cpuUsage = { total: per.length ? Math.round(per.reduce((s, v) => s + v, 0) / per.length) : 0, perCore: per };
+  cpuSample = { at: Date.now(), times: now };
+}, 1000).unref();
+
 app.get('/api/hardware', (req, res) => res.json({
   ...HARDWARE, activeWorkers, queueSize: jobQueue.length,
   // otimizador externo (ADR 006): instalado = o motor Automático usa o sparrow quando ele se aplica
-  externalOptimizer: { name: 'prumo-sparrow', installed: !!findSparrowBinary() }
+  externalOptimizer: { name: 'prumo-sparrow', installed: !!findSparrowBinary(), running: childProcesses.size },
+  usage: {
+    cpuPct: cpuUsage.total,
+    cpuPerCore: cpuUsage.perCore,
+    memUsedPct: Math.round((1 - os.freemem() / os.totalmem()) * 100),
+    memTotalGb: +(os.totalmem() / 2 ** 30).toFixed(1),
+    serverRssMb: Math.round(process.memoryUsage().rss / 2 ** 20),
+    load1: +os.loadavg()[0].toFixed(2),
+    jobsRunning: activeWorkers,
+    jobsQueued: jobQueue.length,
+    at: Date.now()
+  }
 }));
 
 app.post('/api/upload-dxf', upload.single('dxfFile'), (req, res) => {
@@ -238,7 +296,7 @@ app.post('/api/start-job', (req, res) => {
     }
     const job = buildJob({ parsedDxf: cached.parsed, sheet, config, quantities, importOptions });
     const jobId = `J_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    pendingJobs.set(jobId, { jobId, parts: job.expandedParts, sheet, config: job.normalizedConfig, createdAt: Date.now(), ip: req.ip });
+    pendingJobs.set(jobId, { jobId, parts: job.expandedParts, sheet: job.sheet, config: job.normalizedConfig, createdAt: Date.now(), ip: req.ip });
     res.json({ jobId, catalogParts: job.catalogParts, expandedCount: job.expandedParts.length, normalizedConfig: job.normalizedConfig, warnings: job.warnings });
   } catch (e) {
     res.status(400).json({ error: e.message });

@@ -1,3 +1,83 @@
+# V5.6 — chapa desenhada no sparrow, chapa usada vinda do DXF, interface nova, cálculo antigo parado de verdade
+
+## Chapa desenhada (irregular) no otimizador sparrow — ADR 007 (fase 3)
+* Recortes, defeitos e o que fica fora do contorno viram **obstáculos fixos** dentro da faixa do sparrow, inflados com
+  Clipper2 pela distância certa (a mesma margem do resto da chapa). O Automático deixa de mandar chapa desenhada para o
+  motor clássico. O validador independente não mudou e continua decidindo.
+* Mudança no sparrow: colisão com obstáculo passa a ter perda proporcional (a mesma medida usada entre duas peças).
+  Sem chapa desenhada, nada muda. Lista completa em `native/prumo-sparrow/PRUMO_MODIFICACOES.md`.
+* **Medido (mesmo tempo, semente 1, todos válidos e com todas as peças):**
+
+  | Caso | Clássico: comprimento usado | Sparrow: comprimento usado |
+  |---|---|---|
+  | Modelo 3: 12 anéis Ø405 na chapa usada 3000 × 1200 com 5 recortes, 15 s | 2.662 mm | 2.426 mm |
+  | trueshape em `sheet_stepped`, 8 s | 873,7 mm | 426,2 mm |
+  | industrial em `sheet_ramp_hole`, 8 s | 1.974,7 mm | 1.447,0 mm |
+  | içamento × 3 em `sheet_ramp_hole`, 8 s | 344,5 mm | 209,4 mm |
+
+  No Modelo 3, o retalho do fim da chapa passou de 325 × 1188 para 561 × 1188 mm. Quando as peças não cabem na área
+  da chapa, o Automático continua no clássico, que põe o que couber.
+
+## Chapa usada desenhada junto com as peças (fase 1)
+* Os DXF novos do usuário: **Modelo 2 sem moldura** = 87 gomos (1 peça × 87, sem moldura); **Modelo 3** = um
+  contorno 3000 × 1200 com 5 recortes de gomo (a chapa já usada) mais 12 anéis Ø405 com furo.
+* O DXF Doctor marca como **candidato a chapa** o contorno que tem recortes, é bem maior que as outras peças juntas
+  (≥ 1,5×), comporta todas elas na sua caixa e tem recortes com forma de peça ou medida de chapa comercial (lista
+  `STANDARD_SHEETS`, ±2 mm). A tela pergunta ("parece uma chapa já usada"); **Usar como chapa** tira o contorno da
+  lista de peças e o transforma na chapa (opção de importação `sheetContour`); **Desfazer** volta.
+* Falso positivo medido no corpus público: 1 dos 228 arquivos originais (um mapa-múndi do ezdxf) recebe a sugestão.
+  Como é só sugestão, o usuário recusa com um clique.
+
+## Cálculo antigo parado de verdade (pedido do usuário)
+* **Achado:** mudar modelo, chapa ou peças no meio de um cálculo recomeçava a tela, mas o processo `prumo-sparrow` do
+  cálculo anterior seguia rodando até o fim do tempo (o `worker.terminate()` encerra a thread, não o processo filho).
+  Matar o filho direto deixava processo zumbi.
+* **Correção:** o worker informa o `pid` de cada filho; o cancelamento manda `cancel` ao worker (que encerra o filho e
+  espera ele sair) e, 1,5 s depois, termina o worker e mata o que sobrar. A tela fecha a conexão do cálculo antigo assim
+  que a entrada muda, e fechar a conexão é cancelamento para o servidor.
+* Teste: abre um cálculo de 60 s, fecha a conexão depois de 2,5 s e confere que não sobra `prumo-sparrow` vivo nem
+  zumbi. O teste de interface confere que a mudança abre um único cálculo novo e que o número de cálculos rodando não sobe.
+
+## Painel do servidor ao vivo (pedido do usuário)
+* O servidor mede o uso de CPU por núcleo a cada 1 s; `/api/hardware` devolve `usage` (CPU total e por núcleo,
+  memória, memória do servidor, carga, cálculos rodando e na fila) e se o sparrow está rodando. A tela atualiza a cada
+  2 s enquanto a aba está visível (antes lia uma vez só).
+
+## Interface nova
+* Três colunas: os passos numerados à esquerda (**Peças, Chapa, Corte, Busca**, cada um com o resumo do que está
+  escolhido), a mesa no centro e o resultado à direita (aproveitamento, números que importam, exportar, servidor).
+* Mesa com nitidez de tela retina, grade e **régua em mm**; etiqueta do retalho (**R1 L × A**) só quando cabe dentro
+  dele; nomes das peças desenhados por último, com fundo, para não sumirem sob peças filhas.
+* Cores do arquivo "Cores e tipografia" (sem a fonte Archivo, não aprovada: fica a do sistema, com algarismos
+  tabulares). Retalho em lilás, diferente do sálvia do arquivo, para não se confundir com a peça filha; lead-in em
+  vermelho, como antes.
+* Textos em linguagem de oficina e sem caixa-alta nos rótulos; arrastar o DXF para a tela; o cálculo começa sozinho e
+  recomeça quando algo muda. Todos os ids antigos foram mantidos (a API e os testes não mudaram por isso).
+* Referências usadas para fugir da "cara de IA": noqta.tn (*AI design slop*), dev.to (*break the AI-generated UI
+  curse*), superdesign.dev e uxdesign.cc (*how to de-slopify your designs*).
+
+## Benchmark: dá para subir os pontos? (pergunta do usuário)
+As quatro instâncias mais distantes da referência rodaram com 300 s e 2 threads, 1 semente
+(`bench/public/results/public_v5.6.0_300s_sparrow_2threads.{json,csv}`):
+
+| Instância | 60 s, média de 5 | 60 s, melhor de 5 | 300 s, 2 threads | Média publicada (20 min) | Melhor publicado |
+|---|---|---|---|---|---|
+| jakobs2 | 80,25 | 80,40 | 80,40 | 84,89 | 87,717 |
+| swim | 74,32 | 75,28 | 77,70 | 78,30 | 79,826 |
+| blaz1 | 80,97 | 81,91 | 82,58 | 84,67 | 86,224 |
+| shapes1 | 71,58 | 72,37 | 75,26 | 75,74 | 76,719 |
+
+Mais tempo aproxima swim e shapes1 da média publicada (0,6 e 0,5 ponto). O jakobs2 não muda com tempo: precisa de
+outras sementes. O próximo ganho é rodar várias sementes em paralelo (plano, fase 3).
+
+## Testes
+* `test/engine_sparrow.js`: 14 (novos: 3 chapas irregulares, Modelo 3 com a chapa escolhida, cancelamento sem
+  processo vivo nem zumbi; saiu o teste "chapa desenhada → clássico", que deixou de valer).
+* `test/dxf_doctor.js`: 35 (novos: Modelo 3 sugerido e escolhido; nenhum falso positivo nos Modelos 1 e 2).
+* `test/ui_e2e.js`: 15 (novos: Modelo 3 na tela, cálculo antigo parado ao mudar a chapa, painel do servidor vivo).
+* `test/run.js` 23 e `test/engine_units.js` 5: inalterados.
+* Corpus de DXF: 653 arquivos, 0 travamentos, 0 erros internos.
+
 # V5.5 — otimizador sparrow integrado (fases 2 e 3), corpus público de DXF (fase 1)
 
 ## Otimizador sparrow como motor padrão — ADR 006

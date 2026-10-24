@@ -57,7 +57,7 @@ try { ({ chromium } = require('playwright')); } catch (_) { console.log('  - pla
   });
   await check('motor usado aparece na tela (sparrow instalado → "Otimizador sparrow"; senão, aviso de não instalado)', async () => {
     const hw = await (await fetch(base + '/api/hardware')).json();
-    if (hw.externalOptimizer && hw.externalOptimizer.installed) assert(/Otimizador sparrow/.test(await text('#progressStatusText')), await text('#progressStatusText'));
+    if (hw.externalOptimizer && hw.externalOptimizer.installed) assert(/otimizador sparrow/i.test(await text('#progressStatusText')), await text('#progressStatusText'));
     else assert(/não instalado/.test(await text('#engineStatus')), await text('#engineStatus'));
   });
   // camadas das entidades do DXF baixado (código de grupo 8 depois de ENTITIES)
@@ -111,6 +111,47 @@ try { ({ chromium } = require('playwright')); } catch (_) { console.log('  - pla
   await page.waitForFunction(() => document.querySelector('#dxfReportStatus').textContent === 'não lido', null, { timeout: 20000 });
   await check('DWG enviado como DXF mostra instrução clara', async () => assert(/DWG/.test(await text('#dxfReportItems'))));
   fs.unlinkSync(fake);
+
+  console.log('\n[UI] Modelo 3 (chapa já usada desenhada junto) e painel do servidor');
+  await page.setInputFiles('#dxfInput', FIX('Modelo_3_s_moldura.dxf'));
+  await page.waitForFunction(() => document.querySelector('#dxfReportFile').textContent.includes('Modelo_3'), null, { timeout: 60000 });
+  await check('o contorno 3000 × 1200 com recortes é oferecido como chapa', async () => {
+    assert(/parece uma chapa já usada/.test(await text('#sheetCandidateBanner')), await text('#sheetCandidateBanner'));
+  });
+  await page.click('[data-sheet-act="use"]');
+  await page.waitForFunction(() => /desenhada/.test(document.querySelector('#sheetHint').textContent), null, { timeout: 30000 });
+  await check('"Usar como chapa": 12 anéis no lote e a chapa vira a desenhada', async () => {
+    const vals = await page.$$eval('#sidebarQtyList .qty-number-input', els => els.map(e => e.value));
+    assert.deepStrictEqual(vals, ['12']);
+    assert(/3000 × 1200/.test(await text('#sheetHint')));
+  });
+  await page.waitForSelector('#btnStopKeepBest:not(.hidden)', { timeout: 30000 });
+  await page.waitForTimeout(1500);
+  const streams = [];
+  page.on('request', r => { if (r.url().includes('/api/stream/')) streams.push(r.url()); });
+  const jobsBefore = (await (await fetch(base + '/api/hardware')).json()).usage.jobsRunning;
+  await page.fill('#sheetWidth', '2999');
+  await page.dispatchEvent('#sheetWidth', 'change');
+  await check('mudar a chapa durante o cálculo para o cálculo anterior e começa outro', async () => {
+    assert(/Entrada mudou/.test(await text('#progressStatusText')), await text('#progressStatusText'));
+    await page.waitForFunction(() => /procurando|arranjos|Preparando/.test(document.querySelector('#progressStatusText').textContent), null, { timeout: 15000 });
+    for (let i = 0; i < 40 && streams.length === 0; i++) await page.waitForTimeout(250);
+    assert.strictEqual(streams.length, 1, `streams novos: ${streams.length}`);
+    await page.waitForTimeout(2500);
+    const jobsNow = (await (await fetch(base + '/api/hardware')).json()).usage.jobsRunning;
+    assert(jobsNow <= Math.max(1, jobsBefore), `cálculos rodando: ${jobsNow} (o anterior não parou)`);
+  });
+  await check('painel do servidor mostra o uso real e se atualiza sozinho', async () => {
+    const t1 = await text('#hwInfoBox');
+    assert(/Processador/.test(t1) && /Memória/.test(t1) && /rodando de/.test(t1), t1);
+    const w1 = await page.$eval('#hwInfoBox .meter i', el => el.style.width);
+    await page.waitForTimeout(2600);
+    const stamp = await page.evaluate(async () => (await (await fetch('/api/hardware')).json()).usage.at);
+    assert(Date.now() - stamp < 5000, 'o servidor não está medindo o uso');
+    assert(/%$/.test(w1), w1);
+  });
+  await stopIfRunning();
+  await page.waitForTimeout(2000);
 
   await check('sem erros de JavaScript na página', async () => assert.strictEqual(errors.length, 0, errors.slice(0, 3).join(' | ')));
   console.log(`\n${ok} verificações de interface aprovadas`);

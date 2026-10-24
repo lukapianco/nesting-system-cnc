@@ -16,6 +16,7 @@ let lastDxfReport = null;
 let excludedLayers = new Set();      // layers que o usuário desmarcou no diagnóstico
 let onlyFrames = null;               // ids de moldura escolhidos (null = todas)
 let sheetBeforeFrame = null;         // medidas da chapa antes de aplicar a moldura (para desfazer)
+let sheetContour = null;             // candidato a chapa escolhido no próprio desenho (ex.: CHAPA_1)
 
 // Estado de Viewport (Zoom & Pan)
 let viewZoom = 1;
@@ -110,20 +111,28 @@ const nestingCanvas = document.getElementById('nestingCanvas');
 const hoverInspector = document.getElementById('hoverInspector');
 const ctx = nestingCanvas.getContext('2d');
 
+const pct = (v) => `${Math.max(0, Math.min(100, Math.round(v)))}%`;
 async function refreshHardwareStatus() {
   try {
     const res = await fetch('/api/hardware');
     const hw = await res.json();
-    document.getElementById('hwInfoBox').innerHTML =
-      `<strong>CPU:</strong> ${hw.cpuModel} (${hw.totalCores} threads)<br>` +
-      `<strong>Worker Pool VPS:</strong> Máx ${hw.maxWorkers} simultâneos (Ativos: ${hw.activeWorkers} | Fila: ${hw.queueSize})<br>` +
-      `<strong>Aceleração:</strong> ${hw.gpu.name}`;
+    const u = hw.usage || {};
     const ext = hw.externalOptimizer || {};
+    const cores = (u.cpuPerCore || []).map(v => `<i style="--h:${pct(v)}" title="núcleo: ${pct(v)}"></i>`).join('');
+    document.getElementById('hwInfoBox').innerHTML =
+      `<div class="meter-row"><span>Processador</span><span class="meter ${u.cpuPct > 85 ? 'hot' : ''}"><i style="width:${pct(u.cpuPct || 0)}"></i></span><b>${pct(u.cpuPct || 0)}</b></div>` +
+      (cores ? `<div class="cores">${cores}</div>` : '') +
+      `<div class="meter-row"><span>Memória</span><span class="meter"><i style="width:${pct(u.memUsedPct || 0)}"></i></span><b>${pct(u.memUsedPct || 0)}</b></div>` +
+      `<div class="server-line">Cálculos: <b>${u.jobsRunning ?? hw.activeWorkers}</b> rodando de ${hw.maxWorkers} ao mesmo tempo, <b>${u.jobsQueued ?? hw.queueSize}</b> na fila</div>` +
+      `<div class="server-line">Otimizador sparrow: <b>${ext.installed ? (ext.running ? `rodando (${ext.running})` : 'instalado') : 'não instalado'}</b></div>` +
+      `<div class="server-line">${esc(hw.cpuModel)}, ${hw.totalCores} núcleos${u.memTotalGb ? `, ${u.memTotalGb} GB` : ''}</div>`;
     document.getElementById('engineStatus').textContent = ext.installed
       ? 'Otimizador sparrow instalado neste servidor.'
       : 'Otimizador sparrow não instalado: o Automático usa o motor clássico.';
-  } catch (_) {}
+  } catch (_) { /* servidor fora do ar: o painel fica com o último valor */ }
 }
+// Atualiza a cada 2 s enquanto a aba está visível (o painel mostra o servidor trabalhando, não só a configuração)
+setInterval(() => { if (!document.hidden) refreshHardwareStatus(); }, 2000);
 
 // =========================================================
 // 1. MULTIPLICADOR DE LOTE E QUANTIDADES SINCRONIZADAS
@@ -145,7 +154,8 @@ function setPartQuantity(partId, newQty, triggerSim = true) {
 
 function syncQuantityViews() {
   const totalCount = catalogParts.reduce((acc, p) => acc + (partQuantities[p.id] || 0), 0);
-  document.getElementById('totalPartsBadge').textContent = `Total: ${totalCount} pçs`;
+  document.getElementById('totalPartsBadge').textContent = `${totalCount} ${totalCount === 1 ? 'peça' : 'peças'}`;
+  updateJobLine();
 
   const sidebarList = document.getElementById('sidebarQtyList');
   sidebarList.innerHTML = '';
@@ -157,7 +167,7 @@ function syncQuantityViews() {
     row.innerHTML = `
       <div class="qty-item-info">
         <span class="qty-item-name">${esc(part.name)}</span>
-        <span class="qty-item-dim">${Math.round(part.width)}x${Math.round(part.height)}mm</span>
+        <span class="qty-item-dim">${Math.round(part.width)} × ${Math.round(part.height)} mm</span>
         ${part.quantity_detected > 1 ? `<span class="qty-item-detected">${part.quantity_detected} no desenho</span>` : ''}
       </div>
       <div class="qty-stepper">
@@ -187,7 +197,7 @@ function syncQuantityViews() {
   });
 }
 
-document.querySelectorAll('.quick-batch-bar .chip-btn[data-mult]').forEach(btn => {
+document.querySelectorAll('.qty-quick [data-mult]').forEach(btn => {
   btn.addEventListener('click', () => {
     const mult = Number(btn.dataset.mult);
     catalogParts.forEach(p => { partQuantities[p.id] = mult; });
@@ -211,9 +221,52 @@ btnAutoFillSheet.addEventListener('click', () => {
   scheduleOptimization();
 });
 
+/** Para o cálculo em andamento já (o servidor encerra o worker e o processo do otimizador) e invalida as mensagens dele. */
+function cancelActiveRun(reason = '') {
+  runToken++;
+  if (activeEventSource) { activeEventSource.close(); activeEventSource = null; }
+  btnStopKeepBest.classList.add('hidden');
+  btnRecalculate.disabled = false;
+  if (reason) {
+    progressPanel.classList.remove('hidden');
+    progressStatusText.textContent = reason;
+    progressStrategyText.textContent = '';
+  }
+}
+
 function scheduleOptimization(delay = 400) {
   clearTimeout(startDebounce);
+  // a entrada mudou: o cálculo antigo não vale mais e não pode continuar ocupando o servidor
+  if (activeEventSource) cancelActiveRun('Entrada mudou: o cálculo anterior foi parado, recalculando…');
   startDebounce = setTimeout(startBackendSseOptimization, delay);
+}
+
+// Mudou chapa, corte ou busca: recalcula (e para o cálculo anterior na hora)
+['sheetWidth', 'sheetHeight', 'kerfWidthInput', 'partClearanceInput', 'sheetMarginInput', 'holeClearanceInput', 'leadInLengthInput',
+  'pierceRadiusInput', 'leadInTypeSelect', 'grainRestrictionSelect', 'allowRotation', 'enableInHole', 'minHoleSize', 'minRemnantSize',
+  'engineSelect', 'qualityModeSelect', 'timeLimitInput', 'iterationsInput', 'optimizationGoal'
+].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', () => { if (currentUploadId) { updateHints(); scheduleOptimization(500); } });
+});
+
+function updateHints() {
+  const w = Number(sheetWidthInput.value), h = Number(sheetHeightInput.value);
+  document.getElementById('sheetHint').textContent = customSheetDxf
+    ? `desenhada, ${Math.round(customSheetDxf.width)} × ${Math.round(customSheetDxf.height)}`
+    : `${w} × ${h} mm`;
+  document.getElementById('cutHint').textContent = `kerf ${kerfWidthInput.value}, ponte ${partClearanceInput.value}`;
+  const mode = { RASCUNHO: 'rascunho', PADRAO: 'padrão', PRODUCAO: 'produção', MANUAL: 'manual' }[qualityModeSelect.value];
+  const eng = { AUTO: 'automático', SPARROW: 'sparrow', CLASSICO: 'clássico' }[engineSelect.value];
+  document.getElementById('searchHint').textContent = `${eng}, ${mode}`;
+}
+
+let currentFileName = '';
+function updateJobLine() {
+  const el = document.getElementById('jobLine');
+  if (!currentFileName) { el.textContent = 'Nenhum desenho carregado'; return; }
+  const total = catalogParts.reduce((acc, p) => acc + (partQuantities[p.id] || 0), 0);
+  el.innerHTML = `<strong>${esc(currentFileName)}</strong>, ${catalogParts.length} ${catalogParts.length === 1 ? 'peça diferente' : 'peças diferentes'}, ${total} no lote`;
 }
 
 // =========================================================
@@ -231,14 +284,18 @@ function currentImportOptions() {
     includeDashed: dxfIncludeDashed.checked,
     includeHiddenLayers: dxfIncludeHidden.checked,
     excludeLayers: [...excludedLayers],
-    onlyFrames
+    onlyFrames,
+    sheetContour
   };
 }
 
 /** Envia o DXF das peças; o servidor guarda o arquivo lido (uploadId) e devolve catálogo + diagnóstico. */
 async function uploadPartsFile(file) {
+  cancelActiveRun('Lendo o arquivo novo…');
   excludedLayers = new Set();
   onlyFrames = null;
+  if (sheetContour) { sheetContour = null; if (customSheetDxf && customSheetDxf.fromDrawing) clearCustomSheet(false); }
+  currentFileName = file.name;
   const fd = new FormData();
   fd.append('dxfFile', file);
   fd.append('importOptions', JSON.stringify(currentImportOptions()));
@@ -279,22 +336,35 @@ async function reanalyzeDxf() {
 
 function applyCatalogResponse(data, isNewFile) {
   catalogParts = data.catalogParts || [];
+  // chapa escolhida no próprio desenho (contorno com recortes): vira a chapa do trabalho
+  if (data.drawnSheet) {
+    customSheetDxf = data.drawnSheet;
+    sheetWidthInput.value = Math.round(customSheetDxf.width);
+    sheetHeightInput.value = Math.round(customSheetDxf.height);
+    sheetFileNameLabel.textContent = `Chapa do próprio desenho (${(customSheetDxf.obstacles || []).length} recortes)`;
+    btnClearCustomSheet.classList.remove('hidden');
+  } else if (customSheetDxf && customSheetDxf.fromDrawing) {
+    clearCustomSheet(false);
+  }
   lastDxfReport = data.report || null;
   initDefaultQuantities(catalogParts);
   renderSeparatedParts(catalogParts);
   renderDxfReport(data, isNewFile);
+  renderSheetCandidates(data);
+  updateHints();
+  updateJobLine();
   const big = catalogParts.reduce((m, p) => Math.max(m, Math.min(p.width, p.height)), 0);
   const sheetMin = Math.min(Number(sheetWidthInput.value) || 0, Number(sheetHeightInput.value) || 0);
   if (!customSheetDxf && big > sheetMin && sheetMin > 0) {
     const li = document.createElement('li');
     li.className = 'sev-alto';
-    li.innerHTML = `<strong>ALERTA</strong> — A menor dimensão da maior peça (${big.toFixed(0)} mm) passa da chapa ` +
-      `(${esc(sheetWidthInput.value)} × ${esc(sheetHeightInput.value)} mm): ela não vai caber. Ajuste a chapa.`;
+    li.innerHTML = `<span class="sev">Alerta.</span> A peça maior tem ${big.toFixed(0)} mm no lado menor e a chapa ` +
+      `(${esc(sheetWidthInput.value)} × ${esc(sheetHeightInput.value)} mm) não comporta: ajuste a chapa.`;
     dxfReportItems.prepend(li);
   }
 }
 
-const SEVERITY_LABEL = { erro: 'ERRO', alto: 'ALERTA', medio: 'AVISO', baixo: 'NOTA', info: 'INFO' };
+const SEVERITY_LABEL = { erro: 'Erro.', alto: 'Alerta.', medio: 'Aviso.', baixo: 'Nota.', info: '' };
 
 function renderDxfError(fileName, message) {
   dxfReportBox.classList.remove('hidden');
@@ -302,7 +372,7 @@ function renderDxfError(fileName, message) {
   dxfReportStatus.className = 'dxf-status err';
   dxfReportFile.textContent = fileName || '';
   dxfFrameBanner.classList.add('hidden');
-  dxfReportItems.innerHTML = `<li class="sev-erro"><strong>ERRO</strong> — ${esc(message)}</li>`;
+  dxfReportItems.innerHTML = `<li class="sev-erro"><span class="sev">Erro.</span> ${esc(message)}</li>`;
   dxfLayerList.innerHTML = '';
 }
 
@@ -311,15 +381,14 @@ function renderDxfReport(data, isNewFile) {
   if (!r) { dxfReportBox.classList.add('hidden'); return; }
   dxfReportBox.classList.remove('hidden');
   const worst = r.items.reduce((w, i) => Math.min(w, ['erro', 'alto', 'medio', 'baixo', 'info'].indexOf(i.severity)), 9);
-  dxfReportStatus.textContent = worst === 0 ? 'com erro' : worst === 1 ? 'conferir alertas' : 'lido';
+  dxfReportStatus.textContent = worst === 0 ? 'com erro' : worst === 1 ? 'conferir' : 'lido';
   dxfReportStatus.className = `dxf-status ${worst === 0 ? 'err' : worst === 1 ? 'warn' : 'ok'}`;
 
   const sm = r.summary || {};
   const ents = Object.entries(sm.entities || {}).map(([k, v]) => `${v} ${k}`).join(', ');
-  dxfReportFile.innerHTML = `${esc(data.fileName || '')} · DXF ${esc(r.file.version)} · unidade: ${esc(r.file.units)}<br>` +
-    `${esc(ents || 'nenhuma entidade')}${sm.inserts ? ` · ${sm.inserts} inserção(ões) de bloco (até ${sm.blockDepth} níveis)` : ''}<br>` +
-    `<strong>${sm.closedContours || 0}</strong> contornos fechados → <strong>${sm.catalogParts ?? catalogParts.length}</strong> peça(s) diferente(s), ` +
-    `<strong>${sm.partInstances ?? catalogParts.length}</strong> no desenho`;
+  dxfReportFile.innerHTML = `${(data.fileName || currentFileName) ? `<span class="report-name">${esc(data.fileName || currentFileName)}</span>` : ''}<strong>${sm.closedContours || 0}</strong> contornos fechados viraram <strong>${sm.catalogParts ?? catalogParts.length}</strong> ` +
+    `${(sm.catalogParts ?? catalogParts.length) === 1 ? 'peça' : 'peças diferentes'} (${sm.partInstances ?? catalogParts.length} no desenho).<br>` +
+    `<span title="${esc(ents)}">DXF ${esc(r.file.version)}, em ${esc(r.file.units)}${sm.inserts ? `, ${sm.inserts} blocos inseridos` : ''}.</span>`;
 
   // Moldura(s) detectada(s): chapa sugerida + filtro por moldura
   const frames = data.frames || r.frames || [];
@@ -332,17 +401,17 @@ function renderDxfReport(data, isNewFile) {
       resetZoom();
     }
     const label = (fr) => fr.labels && fr.labels.length ? ` — "${esc(fr.labels.join(' / ').replace(/\n/g, ' '))}"` : '';
-    let html = `Moldura ${Math.round(f.width)} × ${Math.round(f.height)} mm detectada${label(f)}: ela é o contorno da chapa, não uma peça.`;
+    let html = `Moldura ${Math.round(f.width)} × ${Math.round(f.height)} mm encontrada${label(f)}: é o contorno da chapa, não uma peça.`;
     if (sheetBeforeFrame) html += ` Chapa ajustada para ${Math.round(f.width)} × ${Math.round(f.height)} mm.`;
     html += '<br>';
-    if (sheetBeforeFrame) html += `<button type="button" class="btn btn-outline btn-sm" data-frame-act="undo">Voltar para ${esc(sheetBeforeFrame.w)} × ${esc(sheetBeforeFrame.h)}</button>`;
-    else html += `<button type="button" class="btn btn-outline btn-sm" data-frame-act="use">Usar moldura como chapa</button>`;
-    html += `<button type="button" class="btn btn-outline btn-sm" data-frame-act="part">Tratar como peça</button>`;
+    if (sheetBeforeFrame) html += `<button type="button" class="btn btn-small btn-quiet" data-frame-act="undo">Voltar para ${esc(sheetBeforeFrame.w)} × ${esc(sheetBeforeFrame.h)}</button>`;
+    else html += `<button type="button" class="btn btn-small btn-quiet" data-frame-act="use">Usar moldura como chapa</button>`;
+    html += `<button type="button" class="btn btn-small btn-quiet" data-frame-act="part">Tratar como peça</button>`;
     if (frames.length > 1) {
-      html += `<div style="margin-top:6px;">${frames.length} molduras (chapas) no arquivo — peças de:</div>`;
-      html += `<label class="checkbox-row"><input type="radio" name="frameFilter" value="" ${!onlyFrames ? 'checked' : ''}/> todas</label>`;
+      html += `<div style="margin-top:6px;">O arquivo tem ${frames.length} molduras. Usar as peças de:</div>`;
+      html += `<label class="check"><input type="radio" name="frameFilter" value="" ${!onlyFrames ? 'checked' : ''}/> todas</label>`;
       frames.forEach(fr => {
-        html += `<label class="checkbox-row"><input type="radio" name="frameFilter" value="${esc(fr.id)}" ${onlyFrames && onlyFrames[0] === fr.id ? 'checked' : ''}/> ` +
+        html += `<label class="check"><input type="radio" name="frameFilter" value="${esc(fr.id)}" ${onlyFrames && onlyFrames[0] === fr.id ? 'checked' : ''}/> ` +
           `${Math.round(fr.width)} × ${Math.round(fr.height)} (${fr.partContours} contornos)${label(fr)}</label>`;
       });
     }
@@ -356,17 +425,39 @@ function renderDxfReport(data, isNewFile) {
   dxfReportItems.innerHTML = r.items.filter(i => i.code !== 'FRAME').map(i => {
     const where = Array.isArray(i.where) && i.where.length
       ? `<span class="where">em: ${i.where.slice(0, 6).map(w => `(${w.x}, ${w.y})${w.gap !== undefined ? ` abertura ${w.gap} mm` : ''}${w.length !== undefined ? ` ${w.length} mm` : ''}`).join(' · ')}${i.where.length > 6 ? ' …' : ''}</span>` : '';
-    return `<li class="sev-${esc(i.severity)}"><strong>${SEVERITY_LABEL[i.severity] || ''}</strong> — ${esc(i.message)}${where}</li>`;
+    const lab = SEVERITY_LABEL[i.severity];
+    return `<li class="sev-${esc(i.severity)}">${lab ? `<span class="sev">${lab}</span> ` : ''}${esc(i.message)}${where}</li>`;
   }).join('') || '<li class="sev-info">Nenhum problema encontrado.</li>';
 
   // Layers: marcar/desmarcar entra na reanálise
-  dxfLayerList.innerHTML = (r.layers || []).length ? '<strong>Layers</strong>' + r.layers.map(L => {
+  dxfLayerList.innerHTML = (r.layers || []).length ? '<strong>Camadas</strong>' + r.layers.map(L => {
     const auto = L.excludedBecause.filter(x => x !== 'excluída pelo usuário');
     const checked = !excludedLayers.has(L.name) && (L.included > 0 || !auto.length);
-    return `<label class="checkbox-row"><input type="checkbox" data-layer="${esc(L.name)}" ${checked ? 'checked' : ''} ${auto.length && !L.included ? 'disabled' : ''}/>` +
-      `<span>${esc(L.name)} <small>${L.included}/${L.paths} entidades${auto.length ? ' · ' + esc(auto.join(', ')) : ''}</small></span></label>`;
+    return `<label class="check"><input type="checkbox" data-layer="${esc(L.name)}" ${checked ? 'checked' : ''} ${auto.length && !L.included ? 'disabled' : ''}/>` +
+      `<span>${esc(L.name)} <small>${L.included} de ${L.paths} entidades${auto.length ? ', ' + esc(auto.join(', ')) : ''}</small></span></label>`;
   }).join('') : '';
 }
+
+/** "Chapa já usada" desenhada junto com as peças: oferece usá-la como chapa (ou voltar a tratá-la como peça). */
+function renderSheetCandidates(data) {
+  const box = document.getElementById('sheetCandidateBanner');
+  const cands = (data.sheetCandidates || (data.report && data.report.sheetCandidates) || []);
+  if (!cands.length) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  const c = cands.find(x => x.chosen) || cands[0];
+  box.innerHTML = c.chosen
+    ? `O contorno de ${Math.round(c.width)} × ${Math.round(c.height)} mm com ${c.cutouts} recortes está sendo usado como chapa; as outras peças são encaixadas nele.<br>` +
+      `<button type="button" class="btn btn-small btn-quiet" data-sheet-act="undo">Tratar como peça</button>`
+    : `O contorno de ${Math.round(c.width)} × ${Math.round(c.height)} mm com ${c.cutouts} recortes parece uma chapa já usada.<br>` +
+      `<button type="button" class="btn btn-small btn-primary" data-sheet-act="use" data-id="${esc(c.id)}">Usar como chapa</button>`;
+  box.classList.remove('hidden');
+}
+document.getElementById('sheetCandidateBanner').addEventListener('click', (e) => {
+  const act = e.target && e.target.dataset ? e.target.dataset.sheetAct : null;
+  if (!act) return;
+  sheetContour = act === 'use' ? e.target.dataset.id : null;
+  resetZoom();
+  reanalyzeDxf();
+});
 
 dxfFrameBanner.addEventListener('click', (e) => {
   const act = e.target && e.target.dataset ? e.target.dataset.frameAct : null;
@@ -384,7 +475,7 @@ dxfFrameBanner.addEventListener('click', (e) => {
     return;
   }
   resetZoom();
-  if (lastDxfReport) renderDxfReport({ report: lastDxfReport, frames, fileName: dxfReportFile.textContent.split(' · ')[0] }, false);
+  if (lastDxfReport) renderDxfReport({ report: lastDxfReport, frames, fileName: currentFileName }, false);
   startBackendSseOptimization();
 });
 dxfFrameBanner.addEventListener('change', (e) => {
@@ -401,6 +492,26 @@ dxfLayerList.addEventListener('change', (e) => {
 });
 [dxfUnitsSelect, dxfFrameModeSelect, dxfJoinTolInput, dxfMaxGapInput, dxfGroupIdentical, dxfIncludeDashed, dxfIncludeHidden]
   .forEach(el => el.addEventListener('change', scheduleReanalyze));
+
+const dropzone = document.getElementById('dropzone');
+['dragenter', 'dragover'].forEach(ev => dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add('over'); }));
+['dragleave', 'drop'].forEach(ev => dropzone.addEventListener(ev, () => dropzone.classList.remove('over')));
+dropzone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer && e.dataTransfer.files[0];
+  if (file) openPartsFile(file);
+});
+
+async function openPartsFile(file) {
+  fileNameLabel.textContent = file.name;
+  try {
+    await uploadPartsFile(file);
+    resetZoom();
+    startBackendSseOptimization();
+  } catch (err) {
+    showCamMessage(`Não foi possível ler o DXF das peças: ${err.message}`);
+  }
+}
 
 dxfInput.addEventListener('change', async (e) => {
   const file = e.target.files[0];
@@ -426,7 +537,8 @@ sheetDxfInput.addEventListener('change', async (e) => {
   if (data.sheet) {
     customSheetDxf = data.sheet;
     const obsCount = (customSheetDxf.obstacles || []).length;
-    sheetFileNameLabel.textContent = `Chapa DXF: ${file.name} (${obsCount} furo(s) CW)`;
+    sheetFileNameLabel.textContent = `${file.name}${obsCount ? ` (${obsCount} ${obsCount === 1 ? 'recorte' : 'recortes'})` : ''}`;
+    updateHints();
     sheetWidthInput.value = Math.round(customSheetDxf.width);
     sheetHeightInput.value = Math.round(customSheetDxf.height);
     btnClearCustomSheet.classList.remove('hidden');
@@ -435,13 +547,17 @@ sheetDxfInput.addEventListener('change', async (e) => {
   }
 });
 
-btnClearCustomSheet.addEventListener('click', () => {
+function clearCustomSheet(rerun = true) {
   customSheetDxf = null;
   sheetPresetSelect.value = 'rect';
-  sheetFileNameLabel.textContent = '2º (Opcional) Enviar .DXF da Chapa Principal';
+  sheetFileNameLabel.textContent = 'Usar uma chapa desenhada (DXF)';
   btnClearCustomSheet.classList.add('hidden');
-  resetZoom();
-  startBackendSseOptimization();
+  updateHints();
+  if (rerun) { resetZoom(); startBackendSseOptimization(); }
+}
+btnClearCustomSheet.addEventListener('click', () => {
+  if (sheetContour) { sheetContour = null; clearCustomSheet(false); reanalyzeDxf(); return; }
+  clearCustomSheet(true);
 });
 
 sheetPresetSelect.addEventListener('change', async () => {
@@ -461,7 +577,8 @@ sheetPresetSelect.addEventListener('change', async () => {
   if (data.sheet) {
     customSheetDxf = data.sheet;
     const obsCount = (customSheetDxf.obstacles || []).length;
-    sheetFileNameLabel.textContent = `Chapa Preset: ${val} (${obsCount} furo(s) CW)`;
+    sheetFileNameLabel.textContent = `Exemplo: ${sheetPresetSelect.options[sheetPresetSelect.selectedIndex].text}${obsCount ? ` (${obsCount} ${obsCount === 1 ? 'recorte' : 'recortes'})` : ''}`;
+    updateHints();
     sheetWidthInput.value = Math.round(customSheetDxf.width);
     sheetHeightInput.value = Math.round(customSheetDxf.height);
     btnClearCustomSheet.classList.remove('hidden');
@@ -487,7 +604,7 @@ async function loadSelectedPreset() {
   const dxfRes = await fetch(`/api/sample-dxf?preset=${encodeURIComponent(preset)}`);
   const blob = await dxfRes.blob();
   const file = new File([blob], `exemplo_${preset}.dxf`);
-  fileNameLabel.textContent = `${file.name} (Ativo)`;
+  fileNameLabel.textContent = file.name;
   try {
     await uploadPartsFile(file);
     resetZoom();
@@ -522,7 +639,9 @@ function resetRunUi() {
   bestSolutionGlobal = null;
   showCamMessage('');
   document.getElementById('unplacedAlert').classList.add('hidden');
-  ctx.clearRect(0, 0, nestingCanvas.width, nestingCanvas.height);
+  const { W: cw, H: ch } = fitCanvas();
+  ctx.fillStyle = '#0F2E1F';
+  ctx.fillRect(0, 0, cw, ch);
 }
 
 function showCamMessage(text) {
@@ -546,7 +665,9 @@ async function startBackendSseOptimization() {
   progressPanel.classList.remove('hidden');
   progressBarFill.style.width = '0%';
   progressPercentText.textContent = '0%';
-  progressStatusText.textContent = 'Inicializando Matriz NFP/IFP e R-Tree no Worker...';
+  progressStatusText.textContent = 'Preparando o cálculo…';
+  progressStrategyText.textContent = '';
+  progressBestText.textContent = '';
 
   const config = {
     sheet_width: Number(sheetWidthInput.value),
@@ -610,7 +731,7 @@ async function startBackendSseOptimization() {
     const msg = JSON.parse(event.data);
 
     if (msg.type === 'queued') {
-      progressStatusText.textContent = `Fila VPS: Posição #${msg.position} (${msg.activeWorkers}/${msg.maxWorkers} Workers)...`;
+      progressStatusText.textContent = `Na fila do servidor, posição ${msg.position} (${msg.activeWorkers} de ${msg.maxWorkers} cálculos rodando)…`;
       return;
     }
 
@@ -619,7 +740,7 @@ async function startBackendSseOptimization() {
       activeEventSource = null;
       btnStopKeepBest.classList.add('hidden');
       btnRecalculate.disabled = false;
-      progressStatusText.textContent = `Erro no motor: ${msg.error || 'falha desconhecida'}`;
+      progressStatusText.textContent = `O cálculo falhou: ${msg.error || 'erro sem mensagem'}`;
       return;
     }
 
@@ -628,16 +749,16 @@ async function startBackendSseOptimization() {
       progressBarFill.style.width = `${pct}%`;
       progressPercentText.textContent = `${pct}%`;
       if (msg.engine === 'SPARROW') {
-        progressStatusText.textContent = `Otimizador sparrow: ${msg.improvements.toLocaleString()} melhoria(s) que cabem na chapa…`;
-        progressStrategyText.textContent = `Separação + compressão da faixa | Workers: ${msg.activeWorkers}/${msg.maxWorkers}`;
+        progressStatusText.textContent = `Otimizador sparrow procurando, ${msg.improvements.toLocaleString('pt-BR')} ${msg.improvements === 1 ? 'plano melhor' : 'planos melhores'} até agora`;
+        progressStrategyText.textContent = 'Separa as peças sobrepostas e aperta o plano contra o início da chapa';
       } else {
-        progressStatusText.textContent = `BRKGA + SA: ${msg.iter.toLocaleString()} de ${msg.totalIterations.toLocaleString()} avaliações BLF...`;
-        progressStrategyText.textContent = `Taxa: ${msg.calcPerSec.toLocaleString()} layouts/seg | Workers: ${msg.activeWorkers}/${msg.maxWorkers}`;
+        progressStatusText.textContent = `Motor clássico, ${msg.iter.toLocaleString('pt-BR')} de ${msg.totalIterations.toLocaleString('pt-BR')} arranjos testados`;
+        progressStrategyText.textContent = `${msg.calcPerSec.toLocaleString('pt-BR')} arranjos por segundo`;
       }
 
       if (msg.bestResult) {
         bestSolutionGlobal = msg.bestResult;
-        progressBestText.textContent = `Recorde Elite: ${bestSolutionGlobal.compactUtilization}% (${msg.improvements} avanços)`;
+        progressBestText.textContent = `melhor até agora: ${fmtPct(bestSolutionGlobal.compactUtilization)}`;
         drawSheetNesting(bestSolutionGlobal, true);
         updateMetrics(expandedCount, bestSolutionGlobal);
       }
@@ -654,18 +775,17 @@ async function startBackendSseOptimization() {
       currentArchive = msg.topArchive || [];
       progressBarFill.style.width = '100%';
       progressPercentText.textContent = '100%';
-      const endState = msg.stoppedByUser ? '(parado pelo usuário — melhor layout mantido)' : msg.stoppedByTimeLimit ? '(limite de tempo atingido)' : 'Concluídas';
+      const secs = (msg.totalTimeMs / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+      const how = msg.stoppedByUser ? 'parado pelo usuário, melhor plano mantido' : msg.stoppedByTimeLimit ? 'tempo de busca encerrado' : 'busca concluída';
       if (msg.engine === 'SPARROW') {
-        progressStatusText.textContent = `Otimizador sparrow: ${msg.improvements.toLocaleString()} melhoria(s) ${endState} em ${(msg.totalTimeMs / 1000).toFixed(1)}s`;
-        progressStrategyText.textContent = 'Separação + compressão da faixa; layout conferido pelo validador independente';
+        progressStatusText.textContent = `Pronto em ${secs} s com o otimizador sparrow (${how})`;
+        progressStrategyText.textContent = 'Plano conferido pelo validador independente';
       } else {
-        progressStatusText.textContent = `${msg.totalIterations.toLocaleString()} Avaliações ${endState} em ${(msg.totalTimeMs / 1000).toFixed(2)}s!`;
-        progressStrategyText.textContent = msg.engineNote
-          ? `Motor clássico: ${msg.engineNote}`
-          : `Velocidade Média: ${msg.calcPerSec.toLocaleString()} layouts/seg`;
+        progressStatusText.textContent = `Pronto em ${secs} s com o motor clássico (${how})`;
+        progressStrategyText.textContent = msg.engineNote ? `Motor clássico porque ${msg.engineNote}` : `${msg.totalIterations.toLocaleString('pt-BR')} arranjos testados`;
       }
-      if (!bestSolutionGlobal) { progressBestText.textContent = 'Nenhum layout gerado.'; return; }
-      progressBestText.textContent = `Campeão Travado: ${bestSolutionGlobal.compactUtilization}%`;
+      if (!bestSolutionGlobal) { progressBestText.textContent = 'Nenhum plano gerado.'; return; }
+      progressBestText.textContent = '';
 
       drawSheetNesting(bestSolutionGlobal, false);
       updateMetrics(expandedCount, bestSolutionGlobal);
@@ -686,7 +806,7 @@ async function startBackendSseOptimization() {
 btnStopKeepBest.addEventListener('click', async () => {
   if (!currentJobId) return;
   btnStopKeepBest.disabled = true;
-  btnStopKeepBest.textContent = 'Parando (termina a avaliação atual)…';
+  btnStopKeepBest.textContent = 'Parando…';
   try {
     await fetch(`/api/stop/${encodeURIComponent(currentJobId)}`, { method: 'POST' });
   } catch (_) { /* o stream informa o fim */ }
@@ -747,8 +867,8 @@ nestingCanvas.addEventListener('mousemove', (e) => {
 
   if (!bestSolutionGlobal) return;
   const rect = nestingCanvas.getBoundingClientRect();
-  const mx = (e.clientX - rect.left) * (nestingCanvas.width / rect.width);
-  const my = (e.clientY - rect.top) * (nestingCanvas.height / rect.height);
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
 
   // Eixo Y do viewport = eixo Y do CAD (para cima)
   const { startX, startY, scale, H } = lastRenderTransform;
@@ -760,8 +880,8 @@ nestingCanvas.addEventListener('mousemove', (e) => {
   const parts = bestSolutionGlobal.placedParts;
   const hitPart = parts.filter(p => p.nestedInsideHole).find(inPart) || parts.find(inPart);
   if (hitPart) {
-    const seq = hitPart.cutSequenceOrder ? `Ordem Corte: #${hitPart.cutSequenceOrder}` : '';
-    hoverInspector.textContent = `${hitPart.name} [${seq}] | Giro: ${hitPart.angle || 0}° | Dim: ${hitPart.placedWidth}x${hitPart.placedHeight}mm | Pos: (${hitPart.x}, ${hitPart.y})`;
+    const seq = hitPart.cutSequenceOrder ? `, cortada em ${hitPart.cutSequenceOrder}º` : '';
+    hoverInspector.textContent = `${hitPart.name}: ${Math.round(hitPart.placedWidth)} × ${Math.round(hitPart.placedHeight)} mm, girada ${hitPart.angle || 0}°${seq}${hitPart.nestedInsideHole ? ', dentro do furo de outra peça' : ''}`;
     return;
   }
 
@@ -769,248 +889,261 @@ nestingCanvas.addEventListener('mousemove', (e) => {
     r => sheetX >= r.x && sheetX <= r.x + r.width && sheetY >= r.y && sheetY <= r.y + r.height
   );
   if (hitRem) {
-    hoverInspector.textContent = `${hitRem.label} (Sobra Útil) | Dim: ${hitRem.width}x${hitRem.height}mm | Área: ${(hitRem.area / 100).toFixed(1)} cm²`;
+    hoverInspector.textContent = `Retalho ${Math.round(hitRem.width)} × ${Math.round(hitRem.height)} mm (${fmtArea(hitRem.area)}), canto em X ${Math.round(hitRem.x)}, Y ${Math.round(hitRem.y)}`;
     return;
   }
 
-  hoverInspector.textContent = `Coordenada Mesa CNC: X=${Math.round(sheetX)}mm, Y=${Math.round(sheetY)}mm (Zoom: ${Math.round(viewZoom * 100)}%)`;
+  hoverInspector.textContent = `X ${Math.round(sheetX)} mm, Y ${Math.round(sheetY)} mm`;
 });
+
+// Canvas em alta densidade: desenha em coordenadas lógicas (px CSS) e escala pelo devicePixelRatio
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+function fitCanvas() {
+  const w = Math.max(320, nestingCanvas.clientWidth || 960);
+  const h = Math.round(w * 0.6);
+  if (nestingCanvas.width !== Math.round(w * DPR) || nestingCanvas.height !== Math.round(h * DPR)) {
+    nestingCanvas.width = Math.round(w * DPR);
+    nestingCanvas.height = Math.round(h * DPR);
+  }
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  return { W: w, H: h };
+}
+window.addEventListener('resize', () => { if (bestSolutionGlobal) drawSheetNesting(bestSolutionGlobal); });
+
+// Cores da mesa (iguais às do style.css)
+const C = {
+  mesa: '#0F2E1F', chapa: '#163D2A', grade: 'rgba(221, 232, 213, 0.07)', gradeForte: 'rgba(221, 232, 213, 0.14)',
+  regua: 'rgba(221, 232, 213, 0.55)', limite: '#F97316', peca: '#38BDF8', filha: '#34D399', furo: '#FDE047',
+  sucata: '#F87171', retalhoFundo: 'rgba(167, 139, 250, 0.20)', retalho: '#C4B5FD', lead: '#EF4444', leadRuim: '#F59E0B',
+  g00: 'rgba(253, 224, 71, 0.55)', g00Ruim: 'rgba(249, 115, 22, 0.95)', texto: '#0F2E1F', textoClaro: '#E8F0E2'
+};
+const niceStep = (mmPerPx) => {
+  const target = mmPerPx * 70; // ~70 px entre marcas principais
+  const p = Math.pow(10, Math.floor(Math.log10(target)));
+  return [1, 2, 5, 10].map(k => k * p).find(v => v >= target) || 10 * p;
+};
 
 function drawSheetNesting(nesting, isHighlight = false) {
   if (!nesting) return;
-  const pad = 36;
-  const availW = nestingCanvas.width - pad * 2;
-  const availH = nestingCanvas.height - pad * 2;
+  const { W: CW, H: CH } = fitCanvas();
+  const padL = 46, padT = 30, padR = 18, padB = 18; // espaço das réguas
+  const availW = CW - padL - padR;
+  const availH = CH - padT - padB;
   const baseScale = Math.min(availW / nesting.sheetWidth, availH / nesting.sheetHeight);
   const scale = baseScale * viewZoom;
   const H = nesting.sheetHeight;
-
   const drawW = nesting.sheetWidth * scale;
   const drawH = H * scale;
-  const startX = (nestingCanvas.width - drawW) / 2 + viewPanX;
-  const startY = (nestingCanvas.height - drawH) / 2 + viewPanY;
-
+  const startX = padL + (availW - drawW) / 2 + viewPanX;
+  const startY = padT + (availH - drawH) / 2 + viewPanY;
   lastRenderTransform = { startX, startY, scale, H };
 
-  // Mapeamento mesa CNC -> tela: X para a direita, Y PARA CIMA (idêntico ao DXF; nada fica espelhado)
+  // Mesa CNC -> tela: X para a direita, Y PARA CIMA (igual ao DXF; nada fica espelhado)
   const sx = (x) => startX + x * scale;
   const sy = (y) => startY + (H - y) * scale;
   const ring = (pts, ox = 0, oy = 0) => {
     if (!pts || !pts.length) return;
     ctx.beginPath();
-    pts.forEach((pt, idx) => {
-      if (idx === 0) ctx.moveTo(sx(ox + pt.x), sy(oy + pt.y));
-      else ctx.lineTo(sx(ox + pt.x), sy(oy + pt.y));
-    });
+    pts.forEach((pt, idx) => { if (idx === 0) ctx.moveTo(sx(ox + pt.x), sy(oy + pt.y)); else ctx.lineTo(sx(ox + pt.x), sy(oy + pt.y)); });
     ctx.closePath();
   };
 
-  ctx.clearRect(0, 0, nestingCanvas.width, nestingCanvas.height);
+  ctx.fillStyle = C.mesa;
+  ctx.fillRect(0, 0, CW, CH);
 
+  // chapa + grade em escala real
   ctx.save();
-  if (nesting.sheetPoly && nesting.sheetPoly.length > 0) {
-    ring(nesting.sheetPoly);
-    ctx.fillStyle = '#1e293b';
-    ctx.fill();
-    ctx.clip();
-  } else {
-    ctx.fillStyle = '#1e293b';
-    ctx.fillRect(startX, startY, drawW, drawH);
-  }
-
-  // Grade milimetrada
-  ctx.strokeStyle = '#334155';
+  if (nesting.sheetPoly && nesting.sheetPoly.length) ring(nesting.sheetPoly); else { ctx.beginPath(); ctx.rect(startX, startY, drawW, drawH); }
+  ctx.fillStyle = C.chapa;
+  ctx.fill();
+  ctx.clip();
+  const step = niceStep(1 / scale);
   ctx.lineWidth = 1;
-  const stepGrid = nesting.sheetWidth <= 300 ? 20 : 100;
-  for (let x = 0; x <= nesting.sheetWidth; x += stepGrid) {
-    ctx.beginPath(); ctx.moveTo(sx(x), startY); ctx.lineTo(sx(x), startY + drawH); ctx.stroke();
+  for (let x = 0, k = 0; x <= nesting.sheetWidth; x += step / 5, k++) {
+    ctx.strokeStyle = k % 5 === 0 ? C.gradeForte : C.grade;
+    ctx.beginPath(); ctx.moveTo(Math.round(sx(x)) + 0.5, startY); ctx.lineTo(Math.round(sx(x)) + 0.5, startY + drawH); ctx.stroke();
   }
-  for (let y = 0; y <= H; y += stepGrid) {
-    ctx.beginPath(); ctx.moveTo(startX, sy(y)); ctx.lineTo(startX + drawW, sy(y)); ctx.stroke();
+  for (let y = 0, k = 0; y <= H; y += step / 5, k++) {
+    ctx.strokeStyle = k % 5 === 0 ? C.gradeForte : C.grade;
+    ctx.beginPath(); ctx.moveTo(startX, Math.round(sy(y)) + 0.5); ctx.lineTo(startX + drawW, Math.round(sy(y)) + 0.5); ctx.stroke();
   }
 
-  // Furos/Obstáculos internos da Chapa Principal (CW)
+  // recortes e defeitos da chapa
   (nesting.sheetObstacles || []).forEach((obs) => {
     ring(obs.points);
-    ctx.fillStyle = '#0f172a';
+    ctx.fillStyle = C.mesa;
     ctx.fill();
-    ctx.strokeStyle = '#f97316';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = C.limite;
+    ctx.lineWidth = 1.2;
     ctx.setLineDash([5, 4]);
     ctx.stroke();
     ctx.setLineDash([]);
-
-    const ocx = sx(obs.minX + obs.width / 2);
-    const ocy = sy(obs.minY + obs.height / 2);
-    ctx.fillStyle = '#fdba74';
-    ctx.font = 'bold 9.5px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('Furo/Recorte da Chapa', ocx, ocy - 2);
-    ctx.font = '9px monospace';
-    ctx.fillText(`${Math.round(obs.width)}x${Math.round(obs.height)}mm`, ocx, ocy + 9);
-    ctx.textAlign = 'left';
   });
 
-  // Retalhos padronizados da chapa
+  // retalhos: etiqueta de estoque (número e medidas)
   if (showRemnantsInput.checked && nesting.remnants) {
-    nesting.remnants.forEach(rem => {
-      const rx = sx(rem.x), ry = sy(rem.y + rem.height);
-      const rw = rem.width * scale, rh = rem.height * scale;
-      ctx.fillStyle = 'rgba(168, 85, 247, 0.24)';
+    nesting.remnants.forEach((rem, k) => {
+      const rx = sx(rem.x), ry = sy(rem.y + rem.height), rw = rem.width * scale, rh = rem.height * scale;
+      ctx.fillStyle = C.retalhoFundo;
       ctx.fillRect(rx, ry, rw, rh);
-      ctx.strokeStyle = '#c084fc';
-      ctx.lineWidth = 1.8;
+      ctx.strokeStyle = C.retalho;
+      ctx.lineWidth = 1.2;
       ctx.setLineDash([6, 4]);
-      ctx.strokeRect(rx + 1, ry + 1, rw - 2, rh - 2);
+      ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1);
       ctx.setLineDash([]);
-
-      if (rw > 44 && rh > 24) {
-        ctx.fillStyle = '#e9d5ff';
-        ctx.font = 'bold 10px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(rem.label, rx + rw / 2, ry + rh / 2 - 2);
-        ctx.font = '10px monospace';
-        ctx.fillText(`${Math.round(rem.width)}x${Math.round(rem.height)}mm`, rx + rw / 2, ry + rh / 2 + 10);
-        ctx.textAlign = 'left';
+      // etiqueta no centro do retalho, só se couber inteira nele
+      const tag = `R${k + 1}  ${Math.round(rem.width)} × ${Math.round(rem.height)}`;
+      ctx.font = '600 11px ' + getComputedStyle(document.body).fontFamily;
+      const tw = ctx.measureText(tag).width + 12;
+      if (rw > tw + 8 && rh > 26) {
+        const tx = rx + (rw - tw) / 2, ty = ry + (rh - 18) / 2;
+        ctx.fillStyle = C.retalho;
+        ctx.fillRect(tx, ty, tw, 18);
+        ctx.fillStyle = C.texto;
+        ctx.textBaseline = 'middle';
+        ctx.fillText(tag, tx + 6, ty + 9.5);
+        ctx.textBaseline = 'alphabetic';
       }
     });
   }
 
-  // Peças alocadas (mães primeiro, filhas In-Hole por cima)
+  // peças (mães primeiro, filhas por cima)
+  const font = getComputedStyle(document.body).fontFamily;
   const drawOrder = [...nesting.placedParts].sort((a, b) => (a.nestedInsideHole ? 1 : 0) - (b.nestedInsideHole ? 1 : 0));
   drawOrder.forEach(part => {
     ring(part.placedPoints, part.x, part.y);
-    ctx.fillStyle = part.nestedInsideHole ? 'rgba(52, 211, 153, 0.95)' : 'rgba(56, 189, 248, 0.92)';
+    ctx.fillStyle = part.nestedInsideHole ? C.filha : C.peca;
     ctx.fill();
-    ctx.strokeStyle = '#0f172a';
-    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = C.mesa;
+    ctx.lineWidth = 1;
     ctx.stroke();
-
     (part.placedHoles || []).forEach(hole => {
       ring(hole.placedPoints, part.x, part.y);
-      ctx.fillStyle = hole.usableHole ? '#fde047' : '#f87171';
+      ctx.fillStyle = hole.hasChildPartInside ? C.chapa : (hole.usableHole ? C.furo : C.sucata);
       ctx.fill();
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 1.4;
       ctx.stroke();
     });
-
-    const pw = part.placedWidth * scale;
-    const ph = part.placedHeight * scale;
-    if (pw > 26 && ph > 16) {
-      const cx = sx(part.x + part.placedWidth / 2);
-      const cy = sy(part.y + part.placedHeight / 2);
-      ctx.fillStyle = '#0f172a';
-      ctx.font = 'bold 9.5px sans-serif';
-      ctx.textAlign = 'center';
-      const seqLabel = (showCamToolpathInput.checked && part.cutSequenceOrder) ? `[${part.cutSequenceOrder}º] ` : '';
-      ctx.fillText(`${seqLabel}${part.name}${part.angle ? ` (${part.angle}°)` : ''}`, cx, cy - 1);
-      if (ph > 28) {
-        ctx.font = '8.5px monospace';
-        ctx.fillText(`${Math.round(part.placedWidth)}x${Math.round(part.placedHeight)}`, cx, cy + 9);
-      }
-      ctx.textAlign = 'left';
-    }
+  });
+  // nomes por último (filhas não cobrem o nome da mãe); com fundo para ler sobre furo ou peça
+  ctx.font = `600 11px ${font}`;
+  drawOrder.forEach(part => {
+    const pw = part.placedWidth * scale, ph = part.placedHeight * scale;
+    const seqLabel = (showCamToolpathInput.checked && part.cutSequenceOrder) ? `${part.cutSequenceOrder}. ` : '';
+    const label = `${seqLabel}${part.name.replace(/ \(\d+\/\d+\)$/, '')}`;
+    const tw = ctx.measureText(label).width + 8;
+    if (pw < tw + 6 || ph < 22) return;
+    const cx = sx(part.x + part.placedWidth / 2), cy = sy(part.y + part.placedHeight / 2);
+    ctx.fillStyle = 'rgba(232, 240, 226, 0.88)';
+    ctx.fillRect(cx - tw / 2, cy - 8, tw, 16);
+    ctx.fillStyle = C.texto;
+    ctx.textAlign = 'center';
+    ctx.fillText(label, cx, cy + 4);
+    ctx.textAlign = 'left';
   });
 
-  // Visualização CAM: sequência REAL de corte (Inside-Out), G00 e perfuração de cada contorno (furos incluídos)
+  // CAM: deslocamentos G00, entradas de corte e perfurações na ordem real
   const cam = nesting.cam;
   if (showCamToolpathInput.checked && cam && cam.ops && cam.ops.length) {
-    // Avanço rápido G00 (laranja = passa por cima de peça já solta)
-    ctx.lineWidth = 1.3;
-    ctx.setLineDash([4, 4]);
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 4]);
     (cam.rapids || []).forEach(r => {
-      ctx.strokeStyle = r.crossesCut ? 'rgba(249, 115, 22, 0.95)' : 'rgba(250, 204, 21, 0.75)';
-      ctx.beginPath();
-      ctx.moveTo(sx(r.x1), sy(r.y1));
-      ctx.lineTo(sx(r.x2), sy(r.y2));
-      ctx.stroke();
+      ctx.strokeStyle = r.crossesCut ? C.g00Ruim : C.g00;
+      ctx.beginPath(); ctx.moveTo(sx(r.x1), sy(r.y1)); ctx.lineTo(sx(r.x2), sy(r.y2)); ctx.stroke();
     });
     ctx.setLineDash([]);
-
-    const showNumbers = cam.ops.length <= 80;
     cam.ops.forEach(op => {
-      const color = op.invalid ? '#f59e0b' : '#ef4444';
-      // Lead-in (reta ou arco) do ponto de perfuração até a aresta
+      const color = op.invalid ? C.leadRuim : C.lead;
       if (op.leadPath && op.leadPath.length > 1) {
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = color; ctx.lineWidth = 1.6;
         ctx.beginPath();
         op.leadPath.forEach((q, i) => (i === 0 ? ctx.moveTo(sx(q.x), sy(q.y)) : ctx.lineTo(sx(q.x), sy(q.y))));
         ctx.stroke();
       }
-      // Cratera de perfuração
       ctx.fillStyle = color;
-      ctx.beginPath();
-      ctx.arc(sx(op.pierce.x), sy(op.pierce.y), op.kind === 'HOLE' ? 3.6 : 3.2, 0, Math.PI * 2);
-      ctx.fill();
-      if (op.kind === 'HOLE') {
-        ctx.strokeStyle = '#0f172a';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-      }
-      if (showNumbers) {
-        ctx.fillStyle = '#f8fafc';
-        ctx.font = 'bold 9px sans-serif';
-        ctx.fillText(String(op.seq), sx(op.pierce.x) + 5, sy(op.pierce.y) - 4);
-      }
+      ctx.beginPath(); ctx.arc(sx(op.pierce.x), sy(op.pierce.y), 2.6, 0, Math.PI * 2); ctx.fill();
     });
   }
-
   ctx.restore();
 
-  // Contorno externo da chapa
-  ctx.strokeStyle = isHighlight ? '#34d399' : '#94a3b8';
-  ctx.lineWidth = isHighlight ? 3.5 : 2;
-  if (nesting.sheetPoly && nesting.sheetPoly.length > 0) {
-    ring(nesting.sheetPoly);
-    ctx.stroke();
-  } else {
-    ctx.strokeRect(startX, startY, drawW, drawH);
+  // contorno da chapa
+  ctx.strokeStyle = isHighlight ? C.filha : C.limite;
+  ctx.lineWidth = 1.5;
+  if (nesting.sheetPoly && nesting.sheetPoly.length) { ring(nesting.sheetPoly); ctx.stroke(); }
+  else ctx.strokeRect(Math.round(startX) + 0.5, Math.round(startY) + 0.5, Math.round(drawW), Math.round(drawH));
+
+  // réguas em mm (topo e esquerda), na escala da chapa
+  ctx.fillStyle = C.mesa;
+  ctx.fillRect(0, 0, CW, padT - 6);
+  ctx.fillRect(0, 0, padL - 6, CH);
+  ctx.strokeStyle = C.regua; ctx.fillStyle = C.regua;
+  ctx.lineWidth = 1;
+  ctx.font = `10.5px ${font}`;
+  ctx.textAlign = 'center';
+  for (let x = 0; x <= nesting.sheetWidth + 1e-6; x += step / 5) {
+    const X = Math.round(sx(x)) + 0.5;
+    if (X < padL - 6 || X > CW) continue;
+    const major = Math.abs(x / step - Math.round(x / step)) < 1e-6;
+    ctx.beginPath(); ctx.moveTo(X, padT - 7); ctx.lineTo(X, padT - (major ? 15 : 10)); ctx.stroke();
+    if (major) ctx.fillText(String(Math.round(x)), X, padT - 18);
   }
+  ctx.textAlign = 'right';
+  for (let y = 0; y <= H + 1e-6; y += step / 5) {
+    const Y = Math.round(sy(y)) + 0.5;
+    if (Y < padT - 6 || Y > CH) continue;
+    const major = Math.abs(y / step - Math.round(y / step)) < 1e-6;
+    ctx.beginPath(); ctx.moveTo(padL - 7, Y); ctx.lineTo(padL - (major ? 15 : 10), Y); ctx.stroke();
+    if (major) ctx.fillText(String(Math.round(y)), padL - 18, Y + 3.5);
+  }
+  ctx.textAlign = 'left';
+  ctx.fillText('mm', 8, 14);
 }
 
+const fmtPct = (v) => `${Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+const fmtArea = (mm2) => `${(mm2 / 1e6).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 })} m²`;
+const dimTxt = (d) => String(d || '').replace(/(\d+)x(\d+)mm/, '$1 × $2 mm');
+
 function updateMetrics(totalExpandedCount, nesting) {
-  document.getElementById('kpiUtilization').textContent = `${nesting.compactUtilization}%`;
-  document.getElementById('kpiRawRatio').textContent =
-    `Bruto na chapa líquida: ${nesting.rawUtilization}% | Fibra: ${nesting.grain_restriction || 'ORTHOGONAL'}`;
-  document.getElementById('metricNetUtil').textContent = `${nesting.rawUtilization}%`;
-  document.getElementById('metricLargestRemnant').textContent = nesting.largestRemnantArea ? `${nesting.largestRemnantDim} (${(nesting.largestRemnantArea / 100).toFixed(1)} cm²)` : '—';
-  document.getElementById('metricSheetArea').textContent = `${(nesting.sheetArea / 100).toFixed(1)} cm²`;
-  document.getElementById('metricUsedArea').textContent = `${(nesting.usedArea / 100).toFixed(1)} cm²`;
-  document.getElementById('metricPlacedCount').textContent = `${nesting.placedParts.length} / ${totalExpandedCount}`;
-
-  const dNom = nesting.commonLine
-    ? `${nesting.kerf_width} mm (CLC Ativo)`
-    : `${nesting.kerf} mm (${nesting.part_clearance} + ${nesting.kerf_width})`;
-  document.getElementById('metricNominalGap').textContent = dNom;
-
-  document.getElementById('metricRemnantArea').textContent =
-    `${(nesting.remnantArea / 100).toFixed(1)} cm² (${nesting.remnants.length} retalhos)`;
+  document.getElementById('kpiUtilization').textContent = fmtPct(nesting.compactUtilization);
+  document.getElementById('kpiRawRatio').textContent = 'conta o que sobra como retalho de estoque como material não usado';
+  document.getElementById('metricNetUtil').textContent = fmtPct(nesting.rawUtilization);
+  document.getElementById('metricLargestRemnant').textContent = nesting.largestRemnantArea ? dimTxt(nesting.largestRemnantDim) : 'nenhum';
+  document.getElementById('metricSheetArea').textContent = fmtArea(nesting.sheetArea);
+  document.getElementById('metricUsedArea').textContent = fmtArea(nesting.usedArea);
+  const all = nesting.placedParts.length === totalExpandedCount;
+  const placedEl = document.getElementById('metricPlacedCount');
+  placedEl.textContent = `${nesting.placedParts.length} de ${totalExpandedCount}`;
+  placedEl.className = all ? '' : 'bad';
+  document.getElementById('metricNominalGap').textContent = `${nesting.kerf} mm`;
+  document.getElementById('metricNominalGap').title = `ponte ${nesting.part_clearance} mm + kerf ${nesting.kerf_width} mm`;
+  document.getElementById('metricRemnantArea').textContent = nesting.remnants.length
+    ? `${nesting.remnants.length} (${fmtArea(nesting.remnantArea)})` : 'nenhum';
   document.getElementById('metricInHoleParts').textContent = nesting.inHoleCount || 0;
-  document.getElementById('metricFreeSlugs').textContent = `${nesting.freeHoleSlugsCount || 0} (Custo Zero)`;
+  document.getElementById('metricFreeSlugs').textContent = nesting.freeHoleSlugsCount || 0;
 
   const obsCount = (nesting.sheetObstacles || []).length;
   document.getElementById('sheetSpecText').textContent =
-    `Chapa: ${nesting.sheetWidth}x${nesting.sheetHeight}mm | Margem Borda: ${nesting.sheet_margin ?? 6}mm ${nesting.sheetPoly ? `| DXF c/ ${obsCount} obstáculo(s)` : ''}`;
+    `Chapa de ${nesting.sheetWidth} × ${nesting.sheetHeight} mm${nesting.sheetPoly ? `, desenhada${obsCount ? ` com ${obsCount} ${obsCount === 1 ? 'recorte' : 'recortes'}` : ''}` : ''}, ` +
+    `margem de ${nesting.sheet_margin ?? 6} mm. Eixo Y para cima, como no CAD.`;
 
   // Telemetria CAM
   const m = nesting.cam && nesting.cam.metrics;
-  document.getElementById('metricPierces').textContent = m ? `${m.pierceCount} (${m.narrowWebPierces || 0} em alma estreita, ${m.invalidLeads} sem espaço)` : '—';
-  document.getElementById('metricRapid').textContent = m ? `${(m.rapidLength / 1000).toFixed(2)} m / ${(m.cutLength / 1000).toFixed(2)} m` : '—';
+  document.getElementById('metricPierces').textContent = m ? String(m.pierceCount) : '—';
+  document.getElementById('metricPierces').title = m ? `${m.narrowWebPierces || 0} em alma estreita, ${m.invalidLeads} sem espaço para o lead-in` : '';
+  document.getElementById('metricRapid').textContent = m ? `${(m.rapidLength / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} m / ${(m.cutLength / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} m` : '—';
 
   // Validação independente do layout (só disponível no resultado final)
   const vEl = document.getElementById('metricValidation');
   const v = nesting.validation;
   if (!v) {
-    vEl.textContent = 'validando ao final…';
-    vEl.style.color = '';
+    vEl.textContent = 'ao terminar';
+    vEl.className = '';
   } else if (v.ok) {
-    vEl.textContent = `APROVADO (${v.checkedPairs} pares)`;
-    vEl.style.color = '#15803d';
+    vEl.textContent = 'APROVADO';
+    vEl.title = `${v.checkedPairs} pares de peças conferidos pelo validador independente`;
+    vEl.className = 'ok';
   } else {
     vEl.textContent = `REPROVADO (${v.errorCount})`;
-    vEl.style.color = '#b91c1c';
+    vEl.className = 'bad';
   }
 
   const notes = [];
@@ -1022,7 +1155,7 @@ function updateMetrics(totalExpandedCount, nesting) {
   const alertBox = document.getElementById('unplacedAlert');
   if (nesting.unplacedParts && nesting.unplacedParts.length > 0) {
     alertBox.classList.remove('hidden');
-    alertBox.textContent = `Atenção: ${nesting.unplacedParts.length} peça(s) do lote excederam o Inner-Fit Polygon (IFP) da chapa atual.`;
+    alertBox.textContent = `${nesting.unplacedParts.length} ${nesting.unplacedParts.length === 1 ? 'peça não coube' : 'peças não couberam'} nesta chapa. Aumente a chapa ou reduza o lote.`;
   } else {
     alertBox.classList.add('hidden');
   }
@@ -1038,8 +1171,9 @@ function renderArchiveButtons(archive, active, totalExpandedCount) {
   archive.forEach((sol, i) => {
     const b = document.createElement('button');
     b.className = `candidate-chip ${sol === active ? 'active' : ''}`;
-    const ok = sol.validation ? (sol.validation.ok ? '✔ ' : '✖ ') : '';
-    b.textContent = `${ok}Elite #${i + 1}: ${sol.compactUtilization}% (Maior Retalho: ${sol.largestRemnantDim})`;
+    const bad = sol.validation && !sol.validation.ok ? ' (reprovado)' : '';
+    b.textContent = `${i + 1}: ${fmtPct(sol.compactUtilization)}, retalho ${dimTxt(sol.largestRemnantDim)}${bad}`;
+    b.title = sol.engine === 'SPARROW' ? 'plano do otimizador sparrow' : 'plano do motor clássico';
     b.onclick = () => {
       bestSolutionGlobal = sol;
       drawSheetNesting(sol, false);
@@ -1055,35 +1189,30 @@ function renderSeparatedParts(parts) {
   grid.innerHTML = '';
   parts.forEach(part => {
     const q = partQuantities[part.id] ?? 1;
-    const rMaxOuter = part.outer_contour?.max_inscribed_radius ?? 0;
     const card = document.createElement('div');
     card.className = 'part-card';
-    const holesHtml = (part.holes || []).map((h, i) => `
-      <div class="hole-tag ${h.usableHole ? 'promoted' : 'scrap'}">
-        Furo CW #${i + 1}: ${h.width}x${h.height}mm (R_max=${h.max_inscribed_radius || 0}mm) —
-        ${h.usableHole ? 'Sub-Chapa Part-in-Part' : 'Sucata'}
-      </div>
+    const holes = part.holes || [];
+    const usable = holes.filter(h => h.usableHole).length;
+    const holesHtml = holes.map((h, i) => `
+      <div class="hole-tag ${h.usableHole ? 'promoted' : 'scrap'}">Furo ${i + 1}: ${Math.round(h.width)} × ${Math.round(h.height)} mm, ${h.usableHole ? 'pode receber peça' : 'vira sucata'}</div>
     `).join('');
-
+    const rot = part.instances ? [...new Set(part.instances.map(i => i.rotationDeg))].slice(0, 6) : [];
     card.innerHTML = `
-      <div>
-        <div class="part-card-header"><span>${esc(part.name)}</span><span class="part-badge">CCW (As > 0)</span></div>
-        <div class="part-preview"><canvas width="180" height="110" id="prev_${part.id}"></canvas></div>
-        <div class="part-meta">
-          <div><strong>Envelope AABB:</strong> ${part.width} x ${part.height} mm</div>
-          ${part.quantity_detected > 1 ? `<div><strong>No desenho:</strong> ${part.quantity_detected} cópias${part.instances ? ` (giros: ${[...new Set(part.instances.map(i => i.rotationDeg))].slice(0, 6).join('°, ')}°)` : ''}</div>` : ''}
-          ${part.blockName ? `<div><strong>Bloco:</strong> ${esc(part.blockName)}</div>` : ''}
-          ${part.mirrorOf ? `<div><strong>Espelho de:</strong> ${esc((catalogParts.find(q => q.id === part.mirrorOf) || {}).name || part.mirrorOf)}</div>` : ''}
-          <div><strong>Área Shoelace:</strong> ${(part.area / 100).toFixed(2)} cm² (R_max=${rMaxOuter}mm)</div>
-          ${holesHtml ? `<div class="hole-tag-list">${holesHtml}</div>` : ''}
-        </div>
+      <div class="part-card-header"><span>${esc(part.name)}</span><span class="part-dims">${Math.round(part.width)} × ${Math.round(part.height)} mm</span></div>
+      <div class="part-preview"><canvas width="200" height="110" id="prev_${part.id}"></canvas></div>
+      <div class="part-meta">
+        <div>Área <strong>${(part.area / 1e6).toLocaleString('pt-BR', { maximumFractionDigits: 4 })} m²</strong></div>
+        ${part.quantity_detected > 1 ? `<div><strong>${part.quantity_detected}</strong> cópias no desenho${rot.length > 1 ? `, giradas ${rot.join('°, ')}°` : ''}</div>` : ''}
+        ${part.blockName ? `<div>Bloco <strong>${esc(part.blockName)}</strong></div>` : ''}
+        ${part.mirrorOf ? `<div>Espelho de <strong>${esc((catalogParts.find(c => c.id === part.mirrorOf) || {}).name || part.mirrorOf)}</strong></div>` : ''}
+        ${holes.length ? `<details class="part-holes"><summary>${holes.length} ${holes.length === 1 ? 'furo' : 'furos'}${usable ? `, ${usable} ${usable === 1 ? 'aproveitável' : 'aproveitáveis'}` : ''}</summary>${holesHtml}</details>` : '<div>Sem furos</div>'}
       </div>
       <div class="card-qty-footer">
-        <span>Qtd no Lote:</span>
+        <span>No lote</span>
         <div class="qty-stepper">
-          <button type="button" class="qty-btn" data-card-act="dec" data-id="${part.id}">−</button>
-          <input type="number" id="card_qty_${part.id}" class="qty-number-input" value="${q}" min="0" max="500" />
-          <button type="button" class="qty-btn" data-card-act="inc" data-id="${part.id}">+</button>
+          <button type="button" class="qty-btn" data-card-act="dec" data-id="${part.id}" aria-label="menos">−</button>
+          <input type="number" id="card_qty_${part.id}" class="qty-number-input" value="${q}" min="0" max="500" aria-label="quantidade" />
+          <button type="button" class="qty-btn" data-card-act="inc" data-id="${part.id}" aria-label="mais">+</button>
         </div>
       </div>
     `;
@@ -1099,23 +1228,26 @@ function renderSeparatedParts(parts) {
     inp.onchange = () => setPartQuantity(part.id, inp.value);
 
     const c = document.getElementById(`prev_${part.id}`);
-    const mCtx = c.getContext('2d');
-    const s = Math.min(150 / part.width, 86 / part.height);
-    const ox = (180 - part.width * s) / 2, oy = (110 - part.height * s) / 2;
+    const pc = c.getContext('2d');
+    c.width = 200 * DPR; c.height = 110 * DPR; c.style.width = '200px'; c.style.height = '110px';
+    pc.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const s = Math.min(176 / part.width, 92 / part.height);
+    const ox = (200 - part.width * s) / 2, oy = (110 - part.height * s) / 2;
     const prevRing = (pts) => {
-      mCtx.beginPath();
+      pc.beginPath();
       pts.forEach((pt, i) => {
         const px = ox + pt.x * s, py = oy + (part.height - pt.y) * s; // Y para cima, como no CAD
-        if (i === 0) mCtx.moveTo(px, py); else mCtx.lineTo(px, py);
+        if (i === 0) pc.moveTo(px, py); else pc.lineTo(px, py);
       });
-      mCtx.closePath();
+      pc.closePath();
     };
+    pc.strokeStyle = '#0F2E1F';
     prevRing(part.points);
-    mCtx.fillStyle = '#38bdf8'; mCtx.fill(); mCtx.stroke();
-    (part.holes || []).forEach(h => {
+    pc.fillStyle = '#38BDF8'; pc.fill(); pc.stroke();
+    holes.forEach(h => {
       prevRing(h.points);
-      mCtx.fillStyle = h.usableHole ? '#fde047' : '#f87171';
-      mCtx.fill(); mCtx.stroke();
+      pc.fillStyle = h.usableHole ? '#FDE047' : '#163D2A';
+      pc.fill(); pc.stroke();
     });
   });
 }
@@ -1223,8 +1355,8 @@ btnApplyProfile.addEventListener('click', async () => {
 
 window.addEventListener('DOMContentLoaded', () => {
   initProcessProfiles();
+  updateHints();
   refreshHardwareStatus();
   loadSelectedPreset();
 });
 
-setTimeout(() => refreshHardwareStatus(), 5000)

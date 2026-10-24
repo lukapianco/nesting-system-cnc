@@ -119,10 +119,18 @@ pub fn tracker_matches_layout(ct: &CollisionTracker, l: &Layout) -> bool {
                 }
             }
         }
-        if collector.contains_entity(&BasicHazardEntity::Exterior) {
-            let stored_loss = ct.get_container_loss(pk1);
-            let calc_loss = quantify_collision_poly_container(pi1.shape(), l.container().outer_cd().bbox());
-            assert_approx_eq!(f32, stored_loss, calc_loss, ulps = 5);
+        // Prumo: a perda "item × contêiner" soma a borda e os obstáculos fixos da chapa
+        let mut calc_loss = 0.0;
+        for (_, haz) in collector.iter() {
+            match haz {
+                BasicHazardEntity::Exterior => calc_loss += quantify_collision_poly_container(pi1.shape(), l.container().outer_cd().bbox()),
+                BasicHazardEntity::Hole { .. } | BasicHazardEntity::InferiorQualityZone { .. } =>
+                    calc_loss += quantify_collision_poly_poly(pi1.shape(), crate::quantify::tracker::static_hazard_shape(l, haz)),
+                _ => {}
+            }
+        }
+        if calc_loss > 0.0 {
+            assert_approx_eq!(f32, ct.get_container_loss(pk1), calc_loss, epsilon = 1e-3 * calc_loss);
         } else {
             assert_eq!(ct.get_container_loss(pk1), 0.0);
         }

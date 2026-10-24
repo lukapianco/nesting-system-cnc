@@ -8,7 +8,9 @@
 //  * o otimizador enxerga o contorno EXTERNO de cada peça, inflado por g = D_nom/2 + SAFETY (Clipper2, junta redonda);
 //    furos e filhas Part-in-Part voltam depois, com a mesma transformação;
 //  * a faixa tem altura H' = H − 2·b + 2·g (b = margem efetiva da chapa) e começa em (b − g, b − g) na chapa;
-//  * a transformação devolvida vale para as coordenadas ORIGINAIS da peça: girar em torno da origem, depois transladar.
+//  * a transformação devolvida vale para as coordenadas ORIGINAIS da peça: girar em torno da origem, depois transladar;
+//  * chapa desenhada: o que fica fora do contorno (dentro da caixa da chapa) e os furos/defeitos viram obstáculos fixos,
+//    inflados por b − g (assim a peça inflada que não os toca fica a ≥ b deles), calculados no executável com Clipper2.
 'use strict';
 const fs = require('fs');
 const os = require('os');
@@ -42,15 +44,23 @@ function orientationFor(allowedAngles) {
 /**
  * Monta a instância de strip packing.
  * @param {{key:string, points:{x,y}[], demand:number}[]} types - um item por TIPO de peça (contorno externo, ângulo 0)
- * @param {{stripHeight:number, gap:number, allowedAngles:number[], name?:string}} o
+ * @param {{stripHeight:number, gap:number, allowedAngles:number[], name?:string,
+ *          sheet?:{outer:{x,y}[], holes:{x,y}[][], border:number}}} o - sheet: chapa desenhada (coordenadas da chapa)
  */
 function buildInstance(types, o) {
   const g = o.gap / 2 + SAFETY;
+  const prumoSheet = o.sheet ? {
+    outer: o.sheet.outer.map(p => [p.x, p.y]),
+    holes: (o.sheet.holes || []).map(h => h.map(p => [p.x, p.y])),
+    offset: o.sheet.border - g,
+    shift: [-(o.sheet.border - g), -(o.sheet.border - g)]
+  } : undefined;
   return {
     instance: {
       name: o.name || 'prumo',
       strip_height: o.stripHeight + 2 * g,
       prumo_inflate: g,
+      ...(prumoSheet ? { prumo_sheet: prumoSheet } : {}),
       items: types.map((t, i) => ({
         id: i,
         demand: t.demand,
@@ -74,7 +84,7 @@ function transformRing(points, tr) {
  * Roda o otimizador. onSolution(sol) é chamado a cada solução viável que melhora a faixa.
  * Devolve { best, lines, stderrTail, exitCode }. stop() pede parada cooperativa (fica com a melhor).
  */
-function runSparrow(instance, { timeS = 60, seed = 1, workers = 1, early = false, bin = findSparrowBinary(), onSolution = null } = {}) {
+function runSparrow(instance, { timeS = 60, seed = 1, workers = 1, early = false, bin = findSparrowBinary(), onSolution = null, onSpawn = null, onExit = null } = {}) {
   if (!bin) return { promise: Promise.reject(new Error('prumo-sparrow não encontrado (compile native/prumo-sparrow ou defina PRUMO_SPARROW_BIN)')), stop() {} };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prumo-sparrow-'));
   const file = path.join(dir, 'instancia.json');
@@ -82,6 +92,7 @@ function runSparrow(instance, { timeS = 60, seed = 1, workers = 1, early = false
   const args = ['--input', file, '--time', String(timeS), '--seed', String(Math.max(0, Math.floor(seed))), '--workers', String(Math.max(1, workers))];
   if (early) args.push('--early');
   const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+  if (onSpawn && child.pid) onSpawn(child.pid);
   let best = null, buf = '', stderrTail = '', errorMsg = null;
   const promise = new Promise((resolve, reject) => {
     child.stdout.on('data', d => {
@@ -100,6 +111,7 @@ function runSparrow(instance, { timeS = 60, seed = 1, workers = 1, early = false
     child.stderr.on('data', d => { stderrTail = (stderrTail + d.toString('utf8')).slice(-4000); });
     child.on('error', reject);
     child.on('close', code => {
+      if (onExit && child.pid) onExit(child.pid);
       try { fs.rmSync(dir, { recursive: true, force: true }); } catch (_) { /* temporário */ }
       if (errorMsg || (code !== 0 && !best)) reject(new Error(errorMsg || `prumo-sparrow saiu com código ${code}: ${stderrTail.slice(-400)}`));
       else resolve({ best, exitCode: code, stderrTail });

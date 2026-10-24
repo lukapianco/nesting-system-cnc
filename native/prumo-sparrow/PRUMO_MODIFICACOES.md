@@ -25,6 +25,7 @@ Ele está aqui, inteiro. O resto do Prumo continua sob a licença do Prumo.
 | `src/geometry/fail_fast/piers.rs` | `ndarray::Array::linspace` trocado por uma função `linspace` local equivalente | sem `ndarray` |
 | `src/entities/layout.rs` | `ContainerMismatch` com `Display`/`Error` escritos à mão | sem `thiserror` |
 | vários | `rand_distr::num_traits` → `num_traits` | dependência direta |
+| `src/probs/spp/entities/strip.rs`, `src/probs/spp/entities/mod.rs` | **V5.6:** `PRUMO_STRIP_OBSTACLES` (`OnceLock<InferiorQualityZone>`); ao montar o contêiner da faixa, as formas dessa zona que tocam a faixa entram como zona de qualidade 0 | chapa desenhada (irregular): o que fica fora do contorno e os furos/defeitos viram obstáculos fixos. O mecanismo de zonas de qualidade e a detecção de colisão com elas já existiam no jagua-rs; só passamos a preenchê-lo |
 
 ## Mudanças no sparrow 0.3.0
 
@@ -36,9 +37,15 @@ Ele está aqui, inteiro. O resto do Prumo continua sob a licença do Prumo.
 | `src/util/io.rs` | sem `MainCli`, sem logger `fern`, sem gravação de SVG |
 | `src/lib.rs` | formatador `FMT()` local no lugar do `numfmt` (só aparece em mensagens de log) |
 | `src/consts.rs`, `src/util/assertions.rs` | sem as opções de desenho SVG |
+| `src/main.rs` (V5.6) | campo `prumo_sheet` (`outer`, `holes`, `offset`, `shift`): obstáculos = (caixa − contorno) ∪ furos, anéis em sentido horário invertidos antes do offset, inflados por `b − g` com Clipper2 e deslocados para a faixa; vão para `PRUMO_STRIP_OBSTACLES` antes da importação |
+| `src/quantify/tracker.rs`, `src/eval/collision_loss.rs` (V5.6) | colisão com `Hole`/`InferiorQualityZone` passa a somar à perda de contêiner `quantify_collision_poly_poly(peça, obstáculo)` (mesma medida usada entre duas peças); a perda de borda vira `+=`; função pública `static_hazard_shape` |
+| `src/util/assertions.rs` (V5.6) | a conferência de depuração soma perda de borda e de obstáculos |
 
 O algoritmo (construção LBF, exploração, compressão, separador com GLS, busca por amostragem e descida de
-coordenadas, função de perda por polos) **não foi alterado**.
+coordenadas, função de perda por polos) **não foi alterado**. A única mudança de comportamento é da V5.6: no original,
+uma peça sobre um obstáculo fixo era marcada como colisão mas não tinha perda proporcional (o separador não sabia "para
+onde empurrar"); agora a sobreposição com o obstáculo é medida com a mesma função usada entre duas peças. Sem chapa
+desenhada (sem obstáculos), o comportamento é idêntico ao anterior.
 
 ## Compilar
 

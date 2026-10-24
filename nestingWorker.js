@@ -1441,9 +1441,15 @@ function runHybridMetaheuristicLoop(engineNote = null) {
 // =========================================================================
 // O sparrow (minimização de sobreposição + compressão da faixa) posiciona as MÃES pelo contorno externo inflado;
 // filhas In-Hole, métricas, retalhos, CAM e validação são os mesmos do motor clássico (assembleResult/finalize).
-// Qualquer coisa fora do que ele resolve (chapa desenhada, lote que não cabe, layout reprovado) volta para o clássico.
+// Chapa desenhada entra como obstáculos fixos (V5.6). O que ele não resolve (lote que não cabe, layout reprovado) volta para o clássico.
 
 const sparrowBridge = require('./engine/sparrowBridge');
+
+function polygonArea(pts) {
+  let s = 0;
+  for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; s += a.x * b.y - b.x * a.y; }
+  return s / 2;
+}
 
 function polygonPerimeter(pts) {
   let s = 0;
@@ -1455,14 +1461,17 @@ function polygonPerimeter(pts) {
 function sparrowNotApplicable() {
   if (params.engine === 'CLASSICO') return null; // escolha explícita: nada a avisar
   if (!sparrowBridge.findSparrowBinary()) return 'otimizador externo (prumo-sparrow) não instalado neste servidor';
-  if (sheet?.isCustomDxf) return 'chapa desenhada (contorno irregular ou com furos) ainda usa o motor clássico';
   if (!parts.length) return 'sem peças';
   const b = EFFECTIVE_BORDER_MARGIN, g = NOMINAL_PART_GAP / 2 + sparrowBridge.SAFETY;
   const H = SHEET_H - 2 * b, W = SHEET_W - 2 * b;
   if (H <= 0 || W <= 0) return 'margem maior que a chapa';
   // área inflada (contorno + faixa de meia folga) maior que a chapa útil: não cabe tudo numa chapa
   const need = parts.reduce((s, p) => s + p.area + polygonPerimeter(p.points) * g + Math.PI * g * g, 0);
-  if (need > (W + 2 * g) * (H + 2 * g)) return 'as peças não cabem numa chapa (área); o motor clássico posiciona o máximo possível';
+  // chapa desenhada: área líquida (contorno − furos/defeitos); retangular: área útil dentro da margem
+  const avail = sheet?.isCustomDxf
+    ? Math.abs(polygonArea(sheet.points)) - (sheet.obstacles || []).reduce((s, o) => s + Math.abs(polygonArea(o.points)), 0)
+    : (W + 2 * g) * (H + 2 * g);
+  if (need > avail) return 'as peças não cabem numa chapa (área); o motor clássico posiciona o máximo possível';
   return null;
 }
 
@@ -1491,7 +1500,8 @@ async function runSparrowEngine() {
   }
   const b = EFFECTIVE_BORDER_MARGIN;
   const { instance, inflate } = sparrowBridge.buildInstance(types, {
-    stripHeight: SHEET_H - 2 * b, gap: NOMINAL_PART_GAP, allowedAngles: ALLOWED_ROTATIONS, name: 'prumo'
+    stripHeight: SHEET_H - 2 * b, gap: NOMINAL_PART_GAP, allowedAngles: ALLOWED_ROTATIONS, name: 'prumo',
+    sheet: sheet?.isCustomDxf ? { outer: sheet.points, holes: (sheet.obstacles || []).map(o => o.points), border: b } : undefined
   });
   const maxStrip = SHEET_W - 2 * b + 2 * inflate + 1e-6;
   const off = b - inflate;
@@ -1538,6 +1548,9 @@ async function runSparrowEngine() {
   let improvements = 0, lastSent = 0, stoppedByUser = false;
   const run = sparrowBridge.runSparrow(instance, {
     timeS, seed: params.seed_offset, workers,
+    // o servidor guarda o pid para encerrar o processo se o job for cancelado (terminar o worker não o encerra)
+    onSpawn: (pid) => parentPort.postMessage({ type: 'child', pid }),
+    onExit: (pid) => parentPort.postMessage({ type: 'child-exit', pid }),
     onSolution: (sol) => {
       if (sol.strip_width > maxStrip) return;
       if (fitting.length && sol.strip_width >= fitting[fitting.length - 1].strip_width) return;
@@ -1556,6 +1569,11 @@ async function runSparrowEngine() {
       });
     }
   });
+  // cancelamento (job trocado/fechado na tela): o servidor avisa antes de terminar o worker; encerrar o processo
+  // aqui deixa o próprio worker recolhê-lo (terminar o worker direto deixaria um processo zumbi)
+  let cancelled = false;
+  const onCancel = (m) => { if (m && m.type === 'cancel') { cancelled = true; run.kill(); } };
+  parentPort.on('message', onCancel);
   const poll = setInterval(() => {
     if (stopRequested() && !stoppedByUser) { stoppedByUser = true; run.stop(); }
     parentPort.postMessage({ type: 'progress', engine: 'SPARROW', iter: improvements, totalIterations: Math.max(1, improvements), fraction: Math.min(1, (Date.now() - startTime) / (timeS * 1000)), calcPerSec: 0, improvements, isNewRecord: false });
@@ -1563,12 +1581,15 @@ async function runSparrowEngine() {
   let failure = null;
   try { await run.promise; } catch (e) { failure = e.message; }
   clearInterval(poll);
+  parentPort.off('message', onCancel);
+  if (cancelled) { parentPort.postMessage({ type: 'cancelled' }); return; }
 
   // as últimas soluções (as melhores) viram o arquivo de alternativas; só entram as aprovadas pelo validador
   const finals = [];
   for (const sol of fitting.slice(-6).reverse()) {
     const res = finalize(toResult(sol));
     if (res.validation.ok) finals.push(res);
+    else if (process.env.PRUMO_DEBUG) console.error('[sparrow] reprovado:', res.validation.errors.slice(0, 4).map(e => e.msg).join(' | '));
   }
   finals.sort((a, c) => compareSolutions(c, a, goal));
 

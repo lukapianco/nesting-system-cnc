@@ -135,6 +135,57 @@ fn inflate_items(inst: &mut jagua_rs::probs::spp::io::ext_repr::ExtSPInstance, d
     Ok(())
 }
 
+/// Campo opcional "prumo_sheet": {"outer": [[x,y]...], "holes": [[[x,y]...]...], "offset": d, "shift": [dx,dy]}
+/// (coordenadas da chapa). Obstáculo = (caixa da chapa − contorno) ∪ furos, cada um inflado por `offset` (pode ser
+/// negativo) e deslocado por `shift` para o referencial da faixa. Entra como zona de qualidade 0 (furo) do contêiner.
+fn build_sheet_obstacles(path: &Path, sur: jagua_rs::geometry::fail_fast::SPSurrogateConfig) -> Result<Option<usize>> {
+    use clipper2_rust::{area, difference_d, inflate_paths_d, EndType, FillRule, JoinType, PathD, PathsD, Point};
+    use jagua_rs::entities::InferiorQualityZone;
+    use jagua_rs::geometry::shape_modification::{ShapeModifyConfig, ShapeModifyMode};
+    use jagua_rs::geometry::{DTransformation, OriginalShape};
+    use jagua_rs::io::ext_repr::ExtSPolygon;
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
+    let Some(sh) = v.get("prumo_sheet") else { return Ok(None) };
+    let ring = |r: &serde_json::Value| -> Result<PathD> {
+        r.as_array().context("anel inválido")?.iter().map(|p| {
+            let a = p.as_array().context("ponto inválido")?;
+            Ok(Point::new(a[0].as_f64().context("x")?, a[1].as_f64().context("y")?))
+        }).collect()
+    };
+    let outer = ring(sh.get("outer").context("prumo_sheet.outer ausente")?)?;
+    let holes: Vec<PathD> = sh.get("holes").and_then(|h| h.as_array()).map(|hs| hs.iter().map(ring).collect::<Result<Vec<_>>>()).transpose()?.unwrap_or_default();
+    let off = sh.get("offset").and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let (sx, sy) = sh.get("shift").and_then(|s| s.as_array()).map(|a| (a[0].as_f64().unwrap_or(0.0), a[1].as_f64().unwrap_or(0.0))).unwrap_or((0.0, 0.0));
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in &outer { x0 = x0.min(p.x); y0 = y0.min(p.y); x1 = x1.max(p.x); y1 = y1.max(p.y); }
+    let bbox: PathD = vec![Point::new(x0, y0), Point::new(x1, y0), Point::new(x1, y1), Point::new(x0, y1)];
+    // área fora do contorno, dentro da caixa da chapa: peças simples (o contorno toca os 4 lados da caixa)
+    let mut regions: PathsD = difference_d(&vec![bbox], &vec![outer], FillRule::NonZero, 4).into_iter().filter(|r| area(r).abs() > 1e-6).collect();
+    regions.extend(holes.into_iter());
+    // orientação positiva em todos: um anel horário seria tratado como furo pelo offset (encolheria e sumiria)
+    for r in regions.iter_mut() { if area(r) < 0.0 { r.reverse(); } }
+    let mut shapes = Vec::new();
+    for r in regions {
+        let grown: PathsD = if off != 0.0 { inflate_paths_d(&vec![r], off, JoinType::Round, EndType::Polygon, 2.0, 4, 0.002) } else { vec![r] };
+        for g in grown {
+            if area(&g) <= 1e-6 { continue; } // positivo = contorno externo (o offset não cria furos aqui)
+            let pts: Vec<(f32, f32)> = g.iter().map(|p| ((p.x + sx) as f32, (p.y + sy) as f32)).collect();
+            let shape = jagua_rs::io::import::import_simple_polygon(&ExtSPolygon(pts))?;
+            shapes.push(OriginalShape {
+                shape,
+                pre_transform: DTransformation::empty(),
+                modify_mode: ShapeModifyMode::Inflate,
+                modify_config: ShapeModifyConfig { simplify_tolerance: None, offset: None, narrow_concavity_cutoff: None },
+            });
+        }
+    }
+    if shapes.is_empty() { return Ok(Some(0)); }
+    let n = shapes.len();
+    let zone = InferiorQualityZone::new(0, shapes, sur)?;
+    jagua_rs::probs::spp::entities::PRUMO_STRIP_OBSTACLES.set(zone).map_err(|_| anyhow::anyhow!("obstáculos já definidos"))?;
+    Ok(Some(n))
+}
+
 fn run() -> Result<()> {
     let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
     LazyLock::force(&EPOCH);
@@ -161,6 +212,10 @@ fn run() -> Result<()> {
     if inflate > 0.0 {
         if ext_instance.min_item_separation != 0.0 { bail!("use prumo_inflate OU min_item_separation, não os dois"); }
         inflate_items(&mut ext_instance, inflate)?;
+    }
+    // Prumo: chapa desenhada (contorno irregular e furos) vira obstáculos fixos na faixa
+    if let Some(n) = build_sheet_obstacles(Path::new(&args.input), config.cde_config.item_surrogate_config)? {
+        eprintln!("[PRUMO] {n} obstáculo(s) fixo(s) da chapa");
     }
     let importer = Importer::new(config.cde_config, config.poly_simpl_tolerance, config.narrow_concavity_cutoff_ratio);
     let instance = jagua_rs::probs::spp::io::import_instance(&importer, &ext_instance)?;

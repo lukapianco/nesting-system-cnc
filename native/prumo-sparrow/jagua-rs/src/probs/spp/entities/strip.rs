@@ -1,9 +1,15 @@
 use crate::collision_detection::CDEConfig;
-use crate::entities::Container;
+use crate::entities::{Container, InferiorQualityZone};
 use crate::geometry::primitives::{Rect, SPolygon};
 use crate::geometry::shape_modification::{ShapeModifyConfig, ShapeModifyMode};
 use crate::geometry::{DTransformation, OriginalShape};
 use anyhow::{Result, ensure};
+use std::sync::OnceLock;
+
+/// Prumo: obstáculos fixos da chapa (furos/defeitos e a área fora de um contorno irregular), em coordenadas da
+/// faixa, como zona de qualidade 0 (tratada como furo pelo jagua-rs). Um processo do prumo-sparrow resolve uma única
+/// instância, então o valor é definido uma vez, antes da importação, e vale para todas as larguras da faixa.
+pub static PRUMO_STRIP_OBSTACLES: OnceLock<InferiorQualityZone> = OnceLock::new();
 
 #[derive(Clone, Debug, Copy, PartialEq)]
 /// Represents a rectangular container with fixed height and variable width.
@@ -41,6 +47,14 @@ impl TryFrom<Strip> for Container {
     type Error = anyhow::Error;
 
     fn try_from(s: Strip) -> Result<Container> {
+        // Prumo: só os obstáculos que tocam a faixa atual entram (a faixa encolhe durante a otimização)
+        let zones = match PRUMO_STRIP_OBSTACLES.get() {
+            Some(z) => {
+                let kept = z.filtered(|sh| sh.bbox.x_min < s.width && sh.bbox.x_max > 0.0 && sh.bbox.y_min < s.fixed_height && sh.bbox.y_max > 0.0);
+                if kept.shapes_cd().is_empty() { vec![] } else { vec![kept] }
+            }
+            None => vec![],
+        };
         Container::new(
             OriginalShape {
                 shape: SPolygon::from(Rect::try_new(0.0, 0.0, s.width, s.fixed_height)?),
@@ -48,7 +62,7 @@ impl TryFrom<Strip> for Container {
                 modify_mode: ShapeModifyMode::Deflate,
                 modify_config: s.shape_modify_config,
             },
-            vec![],
+            zones,
             s.cde_config,
         )
     }

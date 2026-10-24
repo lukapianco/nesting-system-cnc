@@ -492,7 +492,9 @@ function buildCatalogFromDxf(doc, nestingParams = {}, importOptions = {}) {
   }
   report.summary.catalogParts = parts.length;
   report.summary.partInstances = parts.reduce((s, p) => s + (p.quantity_detected || 1), 0);
-  return { catalogParts: parts, report, frames: contours.frames || [], warnings: contours.warnings || [] };
+  // chapa desenhada junto com as peças (candidato escolhido pelo usuário em importOptions.sheetContour)
+  const drawnSheet = contours.drawnSheet ? { ...buildCustomSheetFromContours(contours.drawnSheet.contours), fromDrawing: contours.drawnSheet.id } : null;
+  return { catalogParts: parts, report, frames: contours.frames || [], warnings: contours.warnings || [], drawnSheet };
 }
 
 // =========================================================================

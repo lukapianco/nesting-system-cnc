@@ -37,9 +37,10 @@ function expandPartsByQuantities(catalogParts, quantitiesMap = {}) {
  */
 function buildJob({ parsedDxf, sheet = null, config = {}, quantities = {}, importOptions = {} }) {
   const normalizedConfig = normalizeNestingParams(config);
-  const { catalogParts, report, frames, warnings } = buildCatalogFromDxf(parsedDxf, normalizedConfig, importOptions);
+  const { catalogParts, report, frames, warnings, drawnSheet } = buildCatalogFromDxf(parsedDxf, normalizedConfig, importOptions);
   const expandedParts = expandPartsByQuantities(catalogParts, quantities);
-  return { catalogParts, expandedParts, normalizedConfig, sheet, warnings, report, frames };
+  // chapa escolhida no próprio desenho vale quando o cliente não mandou outra
+  return { catalogParts, expandedParts, normalizedConfig, sheet: sheet || drawnSheet || null, warnings, report, frames, drawnSheet };
 }
 
 module.exports = { expandPartsByQuantities, buildJob, MAX_QTY_PER_PART };
