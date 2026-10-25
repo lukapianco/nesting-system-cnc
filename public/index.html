@@ -12,7 +12,7 @@
     <div class="brand" title="Prumo — motor de nesting">
       <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4v16" /><path d="M16 20l-5 6h10z" class="fill" /></svg>
       <span class="brand-name">Prumo</span>
-      <span class="brand-version">5.8</span>
+      <span class="brand-version">5.9</span>
     </div>
     <div class="job-line" id="jobLine">Nenhum desenho carregado</div>
     <div class="topbar-actions">
@@ -214,6 +214,24 @@
           <label class="check"><input type="checkbox" id="enableInHole" checked /><span>Aproveitar furos grandes para outras peças</span></label>
           <label class="check muted"><input type="checkbox" id="commonLineInput" disabled /><span>Corte de linha comum (ainda não disponível)</span></label>
           <details class="sub">
+            <summary>Tempo de máquina (estimativa)</summary>
+            <p class="note">Valores de partida, não da sua máquina: troque pelos da tabela de corte para o tempo valer.</p>
+            <div class="grid2">
+              <div class="field">
+                <label for="cutSpeedInput" title="Velocidade de corte do material e espessura, da tabela de corte da máquina.">Velocidade de corte (mm/min)</label>
+                <input type="number" id="cutSpeedInput" value="3000" min="10" step="100" />
+              </div>
+              <div class="field">
+                <label for="pierceTimeInput" title="Tempo de cada perfuração, da tabela de corte.">Tempo por perfuração (s)</label>
+                <input type="number" id="pierceTimeInput" value="1" min="0" step="0.1" />
+              </div>
+              <div class="field">
+                <label for="rapidSpeedInput" title="Velocidade da cabeça andando sem cortar (G00).">Velocidade em vazio (mm/min)</label>
+                <input type="number" id="rapidSpeedInput" value="20000" min="100" step="1000" />
+              </div>
+            </div>
+          </details>
+          <details class="sub">
             <summary>Detalhes de geometria</summary>
             <div class="grid2">
               <div class="field">
@@ -354,6 +372,7 @@
             <div><dt>Retalhos do estoque usados</dt><dd id="multiRemnants">—</dd></div>
             <div><dt>Peças cortadas</dt><dd id="multiPlaced">—</dd></div>
             <div><dt>Faltaram</dt><dd id="multiUnplaced">—</dd></div>
+            <div><dt>Tempo de máquina (estimativa)</dt><dd id="multiMachineTime">—</dd></div>
           </dl>
           <p class="note" id="multiSkipped"></p>
         </div>
@@ -380,6 +399,8 @@
           <div><dt>Miolos aproveitáveis</dt><dd id="metricFreeSlugs">—</dd></div>
           <div><dt>Perfurações</dt><dd id="metricPierces">—</dd></div>
           <div><dt>Deslocamento / corte</dt><dd id="metricRapid">—</dd></div>
+          <div><dt>Deslocamento sobre peça solta</dt><dd id="metricCrossings">—</dd></div>
+          <div title="Corte, perfurações e deslocamento em vazio com os valores de &quot;Tempo de máquina&quot; (passo 3). É estimativa: não conta acelerações nem cantos."><dt>Tempo de máquina (estimativa)</dt><dd id="metricMachineTime">—</dd></div>
         </dl>
         </div>
       </section>

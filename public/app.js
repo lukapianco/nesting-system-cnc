@@ -248,7 +248,7 @@ function scheduleOptimization(delay = 400) {
 // Mudou chapa, corte ou busca: recalcula (e para o cálculo anterior na hora)
 ['sheetWidth', 'sheetHeight', 'kerfWidthInput', 'partClearanceInput', 'sheetMarginInput', 'holeClearanceInput', 'leadInLengthInput',
   'pierceRadiusInput', 'leadInTypeSelect', 'grainRestrictionSelect', 'allowRotation', 'enableInHole', 'minHoleSize', 'minRemnantSize',
-  'engineSelect', 'qualityModeSelect', 'timeLimitInput', 'iterationsInput', 'optimizationGoal'
+  'engineSelect', 'qualityModeSelect', 'timeLimitInput', 'iterationsInput', 'optimizationGoal', 'cutSpeedInput', 'pierceTimeInput', 'rapidSpeedInput'
 ].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('change', () => { if (currentUploadId) { updateHints(); scheduleOptimization(500); } });
@@ -721,6 +721,9 @@ async function startBackendSseOptimization() {
     engine: engineSelect.value,
     external_time_s: (QUALITY_MODES[qualityModeSelect.value] || {}).external_time_s || 30,
     reproducible: reproducibleInput.checked,
+    cut_speed_mm_min: Number(document.getElementById('cutSpeedInput').value) || 3000,
+    pierce_time_s: Number(document.getElementById('pierceTimeInput').value) || 0,
+    rapid_speed_mm_min: Number(document.getElementById('rapidSpeedInput').value) || 20000,
     stock_full_sheets: Math.max(0, Math.floor(Number(document.getElementById('fullSheetsInput').value) || 0)),
     stock_remnants: readRemnants(),
     external_budget: (QUALITY_MODES[qualityModeSelect.value] || QUALITY_MODES.PADRAO).external_budget,
@@ -1182,6 +1185,12 @@ function drawSheetNesting(nesting, isHighlight = false) {
 
 const fmtPct = (v) => `${Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
 const fmtArea = (mm2) => `${(mm2 / 1e6).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 3 })} m²`;
+const fmtDuration = (s) => {
+  const t = Math.round(s);
+  if (t < 60) return `${t} s`;
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), r = t % 60;
+  return h ? `${h} h ${String(m).padStart(2, '0')} min` : `${m} min ${String(r).padStart(2, '0')} s`;
+};
 const dimTxt = (d) => String(d || '').replace(/(\d+)x(\d+)mm/, '$1 × $2 mm');
 
 function updateMetrics(totalExpandedCount, nesting, opts = {}) {
@@ -1211,6 +1220,10 @@ function updateMetrics(totalExpandedCount, nesting, opts = {}) {
   const m = nesting.cam && nesting.cam.metrics;
   document.getElementById('metricPierces').textContent = m ? String(m.pierceCount) : '—';
   document.getElementById('metricPierces').title = m ? `${m.narrowWebPierces || 0} em alma estreita, ${m.invalidLeads} sem espaço para o lead-in` : '';
+  const te = nesting.cam && nesting.cam.timeEstimate;
+  document.getElementById('metricMachineTime').textContent = te ? fmtDuration(te.totalS) : '—';
+  document.getElementById('metricMachineTime').title = te ? `corte ${fmtDuration(te.cutS)}, perfurações ${fmtDuration(te.pierceS)}, em vazio ${fmtDuration(te.rapidS)}` : '';
+  document.getElementById('metricCrossings').textContent = m ? (m.rapidCrossings ? `${m.rapidCrossings} ${m.rapidCrossings === 1 ? 'vez' : 'vezes'}` : 'nenhum') : '—';
   document.getElementById('metricRapid').textContent = m ? `${(m.rapidLength / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} m / ${(m.cutLength / 1000).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} m` : '—';
 
   // Validação independente do layout (só disponível no resultado final)
@@ -1296,6 +1309,8 @@ function finishMulti(msg, expandedCount) {
   const un = document.getElementById('multiUnplaced');
   un.textContent = sm.unplaced ? `${sm.unplaced} ${sm.unplaced === 1 ? 'peça' : 'peças'}` : 'nenhuma';
   un.className = sm.unplaced ? 'bad' : 'ok';
+  const totalT = msg.sheets.reduce((acc, sh) => acc + ((sh.bestResult.cam && sh.bestResult.cam.timeEstimate) ? sh.bestResult.cam.timeEstimate.totalS : 0), 0);
+  document.getElementById('multiMachineTime').textContent = totalT ? fmtDuration(totalT) : '—';
   document.getElementById('multiSkipped').textContent = (msg.skipped || []).length
     ? 'Não usadas: ' + msg.skipped.map(k => `${k.label} (${k.why})`).join('; ') + '.' : '';
   document.getElementById('btnExportAllDxf').classList.toggle('hidden', msg.sheets.length < 2);

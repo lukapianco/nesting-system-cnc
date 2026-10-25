@@ -2,6 +2,28 @@
 
 Registro do que foi feito, por quê e como foi verificado. Base para o relatório do PROMPT 2.
 
+## Sessão V5.9 — passo 3: sequência de corte e tempo de máquina
+
+Pedido: com o ok do usuário, fazer o tempo de máquina como passo 3 (o CAM sem máquina virou o passo 4), sem dados
+de máquina por enquanto; registrar antes no plano.
+
+### Decisões
+* Melhorar a sequência de corte (vale para qualquer plano) em vez de só escolher entre planos.
+* Tempo estimado com três valores editáveis, marcados como ponto de partida.
+* O objetivo "menos tempo de máquina" não foi para a tela depois de medido (efeito desprezível).
+
+### Erros meus nesta sessão (corrigidos antes da entrega)
+* O primeiro bench de CAM saiu todo com o motor clássico: o harness de teste fixa o clássico por padrão e eu não
+  passei o motor. Refeito com o Automático.
+* A primeira versão da escolha de entradas por programação dinâmica não olhava perfurações próximas demais; no
+  içamento ela juntava perfurações. Agora a sequência nova só vale se não piorar isso.
+* Uma penalidade maior para G00 sobre peça solta (200 e 600 mm) foi testada: reduz mais esse G00, mas alonga o
+  caminho em alguns casos; ficou a de 60 mm, que melhora os dois.
+
+### Verificação
+* `npm test` com e sem o executável; `test/ui_e2e.js` com o executável.
+* `bench/cam.js --time 15` (antes × depois nos mesmos layouts) e o comparativo de objetivos.
+
 ## Sessão V5.8 — várias chapas e retalhos, threads pela medição do usuário, painel direito
 
 Pedido: registrar o arquivo do teste de paralelismo (i5-12400, 12 threads); seguir para o passo 2 (várias chapas e

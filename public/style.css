@@ -286,7 +286,7 @@ input[type="number"] { text-align: right; }
 .facts { display: flex; flex-direction: column; }
 .facts > div { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-top: 1px solid #D5DED1; font-size: 13px; }
 .facts dt { color: var(--texto); }
-.facts dd { text-align: right; font-weight: 700; }
+.facts dd { text-align: right; font-weight: 700; white-space: nowrap; }
 .facts dd.ok { color: var(--acento); }
 .facts dd.bad { color: var(--erro); }
 

@@ -1,3 +1,30 @@
+# V5.9 — sequência de corte melhor e tempo de máquina estimado (passo 3)
+
+## Sequência de corte — ADR 010
+* **Ordem inicial por várias estratégias:** vizinho mais próximo e "serpentina" por colunas e por linhas (2 a 8
+  faixas); fica a de menor custo, depois o Or-opt de sempre.
+* **Ponto de entrada escolhido pela ida e pela volta** (programação dinâmica sobre a ordem decidida): o corte de um
+  contorno termina onde começou, então a entrada boa deixa a cabeça perto do próximo contorno e longe da peça que
+  acabou de soltar. Só vale se não aumentar perfurações próximas demais nem entradas sem espaço.
+* **Medido nos mesmos layouts** (`bench/cam.js`, V5.8 × V5.9): G00 de 5% a 25% menor; G00 sobre peça já solta
+  caiu em todos os casos (Modelo 2: 69 → 27; Modelo 3: 7 → 1; Modelo 1: 12 → 7). Perfurações: iguais (uma por
+  contorno).
+
+## Tempo de máquina (estimativa)
+* Corte + entradas ÷ velocidade de corte, perfurações × tempo por perfuração, G00 ÷ velocidade em vazio. Padrões
+  3.000 mm/min, 1 s e 20.000 mm/min, **valores de partida, não da sua máquina**; editáveis no passo 3 ("Tempo de
+  máquina (estimativa)"). Aparece por chapa e somado no conjunto de chapas, com a divisão no texto de ajuda.
+* Novo na coluna da direita: "Deslocamento sobre peça solta".
+* **O que a medição mostrou:** com esses valores, o corte é 91% a 95% do tempo e o G00 só 1,5% a 3%. Encurtar o G00
+  ajuda a segurança da cabeça, mas pouco o relógio. O ganho grande de tempo está em cortar menos (linha comum e
+  corte em cadeia), que fica para o passo de CAM, com tabela de corte e corte de teste.
+* **Objetivo "menos tempo de máquina"** ficou só na API (`MIN_MACHINE_TIME`): medido contra "mais material
+  aproveitado", mudou de −0,8 a +1,9 s em 168 a 738 s. Não foi para a tela, porque não mudaria nada que se veja.
+
+## Testes
+* `test/cam_time.js` (novo, 6 sem o executável e 7 com ele): conta do tempo, limites dos valores, coerência da
+  sequência, determinismo, velocidade em dobro, objetivo de tempo no clássico e no sparrow.
+
 # V5.8 — várias chapas e retalhos no mesmo cálculo, threads pela medição de 12 threads, painel direito no novo estilo
 
 ## Várias chapas e retalhos no mesmo cálculo — ADR 009 (fase 3, item obrigatório da v6)

@@ -11,7 +11,7 @@ Serve para laser, plasma, oxicorte, jato d'água e router.
 
 O escopo é **só o nesting**. Estoque de chapas, ordens de serviço e rastreio de sobras ficam no sistema de gestão, que conversa com o Prumo pela API.
 
-> Versão atual: **5.8** — veja o [CHANGELOG](CHANGELOG.md).
+> Versão atual: **5.9** — veja o [CHANGELOG](CHANGELOG.md).
 > Manual de operação: [`docs/Manual_Prumo.md`](docs/Manual_Prumo.md).
 > Decisões técnicas: [`docs/adr/`](docs/adr).
 
@@ -23,7 +23,7 @@ O escopo é **só o nesting**. Estoque de chapas, ordens de serviço e rastreio 
 | **Encaixe** | Dois motores. O **otimizador sparrow** (padrão quando instalado) minimiza a sobreposição e comprime as peças contra uma ponta da chapa. Desde a V5.6 ele também trabalha em chapa desenhada (irregular, com recortes e defeitos). O **motor clássico** (BRKGA + BLF) atende lote maior que a chapa e serve de reserva. Os dois giram as peças conforme a restrição de fibra. O Part-in-Part (peça dentro do furo de outra) vale nos dois. |
 | **Validação independente** | Todo layout passa por um validador que não usa código do motor. Ele confere sobreposição, folga entre peças, margem e furos da chapa, filhas dentro do furo, retalhos, ângulo de fibra e perfuração em sucata. Layout reprovado não é exportado. |
 | **Retalhos** | Retângulos úteis na sobra, com a mesma folga das peças, para ir para o estoque. |
-| **CAM** | Ordem de corte de dentro para fora, lead-in em arco ou reta, perfuração conferida em sucata e deslocamentos G00. |
+| **CAM** | Ordem de corte de dentro para fora, lead-in em arco ou reta, perfuração conferida em sucata e deslocamentos G00 curtos, evitando passar sobre peça já solta. Tempo de máquina estimado com valores editáveis (velocidade de corte, tempo de perfuração, velocidade em vazio). |
 | **Exportação** | DXF R12 em mm. Por padrão leva **só a geometria de corte**, porque outros sistemas leem esse arquivo; chapa, retalhos, lead-ins e nomes são opcionais. O formato está em [`docs/FORMATO_DXF_EXPORTADO.md`](docs/FORMATO_DXF_EXPORTADO.md). |
 
 ## Como instalar
@@ -86,6 +86,7 @@ node bench/public/run.js --time 60 --seeds 5                 # motor clássico
 node bench/public/run.js --engine sparrow --time 60 --seeds 5
 node bench/paralelo.js                                        # como dividir as threads da sua máquina (ADR 008)
 node bench/multichapa.js --time 20                            # lote de várias chapas: clássico × Automático (ADR 009)
+node bench/cam.js --time 15                                   # sequência de corte: G00 e G00 sobre peça solta (ADR 010)
 ```
 
 O benchmark mede a densidade e a validade **fora do motor**: polígonos posicionados, validador independente e contagem de peças. As tabelas estão no CHANGELOG e em `bench/public/results/`. O protocolo está nas ADRs 005 e 006.

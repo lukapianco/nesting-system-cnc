@@ -144,6 +144,10 @@ function normalizeNestingParams(rawConfig = {}) {
     external_budget: Math.min(200000, Math.max(20, Math.floor(Number(rawConfig.external_budget ?? 540)))),
     // buscas independentes ao mesmo tempo (sementes diferentes); 0 = automático pelas threads do job
     parallel_searches: Math.min(64, Math.max(0, Math.floor(Number(rawConfig.parallel_searches ?? 0)))),
+    // V5.8 (passo 3): tempo de máquina ESTIMADO. Padrões são ponto de partida, NÃO dado de fabricante (tabela de corte)
+    cut_speed_mm_min: Math.min(100000, Math.max(10, Number(rawConfig.cut_speed_mm_min ?? 3000))),
+    rapid_speed_mm_min: Math.min(200000, Math.max(100, Number(rawConfig.rapid_speed_mm_min ?? 20000))),
+    pierce_time_s: Math.min(120, Math.max(0, Number(rawConfig.pierce_time_s ?? 1.0))),
     // V5.8 (ADR 009): estoque do cálculo. Chapas inteiras do tamanho da tela (0 a 50; sem estoque nenhum vale 1) e
     // retalhos retangulares [{width, height, quantity, ref?}] (ref = código do retalho no sistema de gestão)
     stock_full_sheets: Math.min(50, Math.max(0, Math.floor(Number(rawConfig.stock_full_sheets ?? 1)))),

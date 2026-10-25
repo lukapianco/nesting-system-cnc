@@ -353,9 +353,9 @@ function planCam(res, params) {
     : u.holeOp);
 
   /** Gera a sequência completa para uma ORDEM de peças mães. */
-  function runSequence(order) {
-    const seq = [], rapids = [], usedPierces = [], finished = [], groups = [];
-    let pos = home, rapidLen = 0, cutLen = 0, crossings = 0, invalid = 0, narrow = 0;
+  function runSequence(order, forced = null) {
+    const seq = [], rapids = [], usedPierces = [], finished = [], groups = [], opsOrder = [];
+    let pos = home, rapidLen = 0, cutLen = 0, crossings = 0, invalid = 0, narrow = 0, closePierces = 0;
     const warn = new Set();
 
     const crossesFinished = (a, b) => {
@@ -376,11 +376,13 @@ function planCam(res, params) {
 
     const emit = (op) => {
       if (op.cands.length === 0) { warn.add(`Sem ponto de perfuração para ${op.item.part.name}`); return; }
-      let best = null, bestScore = Infinity;
-      for (const c of op.cands) {
+      let best = forced && forced.get(op), bestScore = Infinity;
+      if (!best) for (const c of op.cands) {
         const sc = legCost(pos, c.pierce) - c.quality * 0.2 + spacingPenalty(c);
         if (sc < bestScore) { bestScore = sc; best = c; }
       }
+      opsOrder.push(op);
+      if (spacingPenalty(best) > 0) closePierces++;
       const crosses = crossesFinished(pos, best.pierce);
       rapids.push({ x1: pos.x, y1: pos.y, x2: best.pierce.x, y2: best.pierce.y, crossesCut: crosses });
       rapidLen += Math.hypot(best.pierce.x - pos.x, best.pierce.y - pos.y);
@@ -417,10 +419,13 @@ function planCam(res, params) {
         groups.push({ host, start: seq[startIdx].pierce, end: seq[seq.length - 1].entry });
       }
     }
-    return { seq, rapids, rapidLen, cutLen, crossings, invalid, narrow, warnings: warn, groups };
+    return { seq, rapids, rapidLen, cutLen, crossings, invalid, narrow, closePierces, warnings: warn, groups, opsOrder };
   }
 
-  // 1) ordem inicial: vizinho mais próximo (distância simples ao ponto de perfuração mais próximo)
+  // 1) ordem inicial: várias estratégias, fica a de menor custo real (G00 + penalidade por passar sobre peça solta)
+  //    a) vizinho mais próximo a partir da origem (a única até a V5.8);
+  //    b) "serpentina" por colunas e por linhas, com 2 a 8 faixas: a cabeça anda numa direção e não volta sobre o que
+  //       já cortou, que é como programadores de corte costumam sequenciar (menos G00 sobre peça solta).
   const nearestPierceDist = (p, host) => {
     const units = unitsOf(host);
     const ops = units.length ? units.map(unitStartOp) : [info.get(host.id).outer];
@@ -428,22 +433,45 @@ function planCam(res, params) {
     for (const op of ops) for (const c of op.cands) m = Math.min(m, Math.hypot(c.pierce.x - p.x, c.pierce.y - p.y));
     return m;
   };
-  let order = [];
-  {
-    const rem = new Set(hosts);
+  const nnOrder = () => {
+    const out = [], rem = new Set(hosts);
     let p = home;
     while (rem.size) {
       let nb = null, nd = Infinity;
       for (const h of rem) { const d = nearestPierceDist(p, h); if (d < nd) { nd = d; nb = h; } }
-      rem.delete(nb); order.push(nb);
+      rem.delete(nb); out.push(nb);
       const ops = unitsOf(nb).map(unitStartOp);
       const o = ops[0] || info.get(nb.id).outer;
       if (o.cands[0]) p = o.cands[0].pierce;
     }
+    return out;
+  };
+  const center = (h) => ({ x: (h.outerBox.minX + h.outerBox.maxX) / 2, y: (h.outerBox.minY + h.outerBox.maxY) / 2 });
+  const snakeOrder = (axis, bands) => {
+    // axis 'x': faixas verticais (colunas) percorridas em X, dentro de cada uma sobe/desce em Y alternando
+    const W = axis === 'x' ? res.sheetWidth : res.sheetHeight;
+    const step = W / bands;
+    const keyed = hosts.map((h) => {
+      const c = center(h);
+      const along = axis === 'x' ? c.x : c.y, across = axis === 'x' ? c.y : c.x;
+      const band = Math.min(bands - 1, Math.max(0, Math.floor(along / step)));
+      return { h, band, k: band % 2 === 0 ? across : -across };
+    });
+    keyed.sort((a, b) => (a.band - b.band) || (a.k - b.k));
+    return keyed.map((e) => e.h);
+  };
+  const scoreOf = (r) => r.rapidLen + r.crossings * CROSS_PENALTY;
+  const starts = [nnOrder()];
+  if (hosts.length > 2 && hosts.length <= 400) {
+    for (const bands of [2, 3, 4, 6, 8]) { starts.push(snakeOrder('x', bands)); starts.push(snakeOrder('y', bands)); }
+  }
+  let order = starts[0], result = runSequence(order);
+  for (const st of starts.slice(1)) {
+    const r = runSequence(st);
+    if (scoreOf(r) < scoreOf(result) - 1e-6) { result = r; order = st; }
   }
 
   // 2) Or-opt sobre a ordem das peças, usando os pontos reais de entrada/saída de cada grupo
-  let result = runSequence(order);
   const MAX_OROPT_GROUPS = 80;
   if (order.length > 2 && order.length <= MAX_OROPT_GROUPS) {
     for (let pass = 0; pass < 4; pass++) {
@@ -470,10 +498,46 @@ function planCam(res, params) {
         }
       }
       const next = runSequence(cur);
-      if (next.rapidLen + next.crossings * CROSS_PENALTY < result.rapidLen + result.crossings * CROSS_PENALTY - 1e-6) {
+      if (scoreOf(next) < scoreOf(result) - 1e-6) {
         result = next; order = cur;
       } else break;
     }
+  }
+
+  // 3) ponto de entrada de cada contorno escolhido olhando a ida E a volta (V5.8, passo 3 do plano): o corte de um
+  //    contorno termina onde começou, então a entrada boa é a que deixa a cabeça perto do próximo contorno e sem
+  //    passar sobre a peça que acabou de soltar. Programação dinâmica sobre a ordem já decidida (ótima para ela).
+  if (result.opsOrder.length > 1 && result.opsOrder.length <= 600) {
+    const ops = result.opsOrder.filter((op) => op.cands.length);
+    const fin = []; // contornos externos já cortados antes de cada passo
+    const finRings = [];
+    for (const op of ops) { fin.push(finRings.length); if (op.kind === 'OUTER') finRings.push({ ring: op.ring, box: op.item.outerBox }); }
+    const crosses = (a, b, upto) => {
+      if (skipCrossCheck) return false;
+      const sMinX = Math.min(a.x, b.x), sMaxX = Math.max(a.x, b.x), sMinY = Math.min(a.y, b.y), sMaxY = Math.max(a.y, b.y);
+      for (let f = 0; f < upto; f++) {
+        const F = finRings[f];
+        if (F.box.minX <= sMaxX && F.box.maxX >= sMinX && F.box.minY <= sMaxY && F.box.maxY >= sMinY && segmentCrossesRing(a, b, F.ring)) return true;
+      }
+      return false;
+    };
+    const leg = (a, c, i) => Math.hypot(c.pierce.x - a.x, c.pierce.y - a.y) + (crosses(a, c.pierce, fin[i]) ? CROSS_PENALTY : 0) - c.quality * 0.2;
+    const D = ops.map((op) => op.cands.map(() => Infinity)), B = ops.map((op) => op.cands.map(() => -1));
+    ops[0].cands.forEach((c, j) => { D[0][j] = leg(home, c, 0); });
+    for (let i = 1; i < ops.length; i++) {
+      ops[i].cands.forEach((c, j) => {
+        ops[i - 1].cands.forEach((pc, k) => {
+          const v = D[i - 1][k] + leg(pc.entry, c, i);
+          if (v < D[i][j]) { D[i][j] = v; B[i][j] = k; }
+        });
+      });
+    }
+    let j = D[ops.length - 1].indexOf(Math.min(...D[ops.length - 1]));
+    const forced = new Map();
+    for (let i = ops.length - 1; i >= 0; i--) { forced.set(ops[i], ops[i].cands[j]); j = B[i][j]; }
+    const refined = runSequence(order, forced);
+    // perfurações muito próximas (calor acumulado) não podem aumentar
+    if (scoreOf(refined) < scoreOf(result) - 1e-6 && refined.closePierces <= result.closePierces && refined.invalid <= result.invalid) result = refined;
   }
 
   const { seq, rapids } = result;
@@ -484,12 +548,20 @@ function planCam(res, params) {
   for (const op of seq) if (op.kind === 'OUTER') orderByPart.set(op.partId, ++k);
   for (const p of res.placedParts) p.cutSequenceOrder = orderByPart.get(p.id) || 0;
 
+  const leadLen = seq.reduce((acc, op) => {
+    let l = 0;
+    const p = op.leadPath || [];
+    for (let i = 1; i < p.length; i++) l += Math.hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y);
+    return acc + l;
+  }, 0);
   res.cam = {
     home,
     ops: seq,
     rapids,
     warnings: [...new Set(warnings)].slice(0, 20),
+    timeEstimate: estimateMachineTime({ cutLength: result.cutLen, leadLength: leadLen, rapidLength: result.rapidLen, pierceCount: seq.length }, params),
     metrics: {
+      leadLength: +leadLen.toFixed(1),
       pierceCount: seq.length,
       cutLength: +result.cutLen.toFixed(1),
       rapidLength: +result.rapidLen.toFixed(1),
@@ -502,4 +574,19 @@ function planCam(res, params) {
   return res.cam;
 }
 
-module.exports = { planCam };
+/**
+ * Tempo de máquina ESTIMADO (V5.8): corte (contornos + entradas) na velocidade de corte, perfurações pelo tempo de
+ * perfuração e deslocamentos em vazio na velocidade de G00. Os valores padrão (3.000 mm/min, 1 s, 20.000 mm/min)
+ * são só ponto de partida, NÃO dados de fabricante: trocar pelos da tabela de corte da máquina. Não conta acelerações,
+ * cantos nem troca de chapa.
+ */
+function estimateMachineTime(m, params) {
+  const vc = Math.max(1, params.cut_speed_mm_min), vr = Math.max(1, params.rapid_speed_mm_min), tp = Math.max(0, params.pierce_time_s);
+  const cutS = ((m.cutLength + m.leadLength) / vc) * 60;
+  const pierceS = m.pierceCount * tp;
+  const rapidS = (m.rapidLength / vr) * 60;
+  return { cutS: +cutS.toFixed(1), pierceS: +pierceS.toFixed(1), rapidS: +rapidS.toFixed(1), totalS: +(cutS + pierceS + rapidS).toFixed(1),
+    basis: { cut_speed_mm_min: vc, rapid_speed_mm_min: vr, pierce_time_s: tp }, estimate: true };
+}
+
+module.exports = { planCam, estimateMachineTime };

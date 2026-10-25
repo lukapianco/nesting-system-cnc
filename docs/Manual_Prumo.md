@@ -2,7 +2,7 @@
 
 > *Prumo* é o nome do motor de nesting (antes "Motor Industrial de True Shape 2D Nesting", V5.x). A API e os arquivos não mudaram de nome.
 
-**Versão do sistema:** 5.8 · **Público:** (A) operador / programador de corte · (B) profissional que faz a implantação na empresa cliente
+**Versão do sistema:** 5.9 · **Público:** (A) operador / programador de corte · (B) profissional que faz a implantação na empresa cliente
 
 > **Como ler este manual.** Quem só vai operar o sistema lê os capítulos 1 a 8 e usa o 12 (problemas) como consulta.
 > Quem vai implantar na empresa lê tudo, principalmente o capítulo 13 (roteiro de implantação).
@@ -212,6 +212,12 @@ Convenção: **[Padrão]** é o valor inicial da tela. "Aumenta/diminui" descrev
 | **Lead-in Corte** [2,5] | mm | Comprimento (reta) ou **raio** (arco) da trajetória de entrada. O furo da perfuração fica na sucata e o feixe chega à aresta já em movimento, sem deixar marca na peça. Regra prática: **≥ espessura** (mín. ≈ 1,5 mm no laser; ≥ 5 mm no plasma). **0** = perfura direto no contorno (não recomendado). |
 | **Tipo de Lead-in** | — | **Arco tangente** (recomendado, melhor acabamento) · **Reta a 45°** · **Reta perpendicular**. Se o tipo escolhido não couber, o sistema tenta os outros e, depois, um comprimento 40% menor. |
 | **Cratera Pierce** [1,0] | mm | Raio de dano da perfuração. O ponto de perfuração fica a ≥ **raio + Kerf/2 + 0,3 mm** de qualquer contorno de peça e as perfurações ficam a ≥ **2 × raio + 1 mm** entre si. **Aumente** em chapa grossa e em jato d'água com material frágil. |
+
+### 5.4.1 Tempo de máquina (estimativa, V5.9)
+
+No passo **3 Corte**, em **Tempo de máquina (estimativa)**: **Velocidade de corte** (mm/min), **Tempo por perfuração** (s) e **Velocidade em vazio** (mm/min). Os valores que vêm preenchidos (3.000, 1 e 20.000) são só ponto de partida: **troque pelos da tabela de corte da sua máquina** para o tempo valer. A conta é corte (contornos + entradas) ÷ velocidade de corte + perfurações × tempo por perfuração + deslocamento em vazio ÷ velocidade em vazio; não conta aceleração, cantos nem troca de chapa.
+
+O resultado aparece em **Tempo de máquina (estimativa)** na coluna da direita (passe o mouse para ver a divisão) e somado no **Conjunto de chapas**. **Deslocamento sobre peça solta** conta quantas vezes a cabeça anda por cima de uma peça já cortada; desde a V5.9 a sequência de corte evita isso bem mais (ADR 010).
 
 ### 5.5 Furos e Part-in-Part
 

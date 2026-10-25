@@ -1,0 +1,110 @@
+{
+ "data": "2026-10-25T00:25:11.461Z",
+ "tempo_s": 15,
+ "linhas": [
+  {
+   "caso": "industrial ×2",
+   "objetivo": "MAX_UTILIZATION",
+   "motor": "SPARROW",
+   "pecas": 12,
+   "tempo_s": 364.2,
+   "g00_m": 4,
+   "sobre_peca": 7,
+   "aprov_compacto": 79.62,
+   "maior_retalho_m2": 0,
+   "alternativas": 6,
+   "valido": true
+  },
+  {
+   "caso": "industrial ×2",
+   "objetivo": "MIN_MACHINE_TIME",
+   "motor": "SPARROW",
+   "pecas": 12,
+   "tempo_s": 363.9,
+   "g00_m": 3.9,
+   "sobre_peca": 8,
+   "aprov_compacto": 79.62,
+   "maior_retalho_m2": 0,
+   "alternativas": 6,
+   "valido": true
+  },
+  {
+   "caso": "içamento ×8",
+   "objetivo": "MAX_UTILIZATION",
+   "motor": "SPARROW",
+   "pecas": 32,
+   "tempo_s": 168.1,
+   "g00_m": 1.35,
+   "sobre_peca": 25,
+   "aprov_compacto": 54.98,
+   "maior_retalho_m2": 0.076,
+   "alternativas": 6,
+   "valido": true
+  },
+  {
+   "caso": "içamento ×8",
+   "objetivo": "MIN_MACHINE_TIME",
+   "motor": "SPARROW",
+   "pecas": 32,
+   "tempo_s": 168.2,
+   "g00_m": 1.39,
+   "sobre_peca": 23,
+   "aprov_compacto": 55.28,
+   "maior_retalho_m2": 0.076,
+   "alternativas": 6,
+   "valido": true
+  },
+  {
+   "caso": "Modelo 1",
+   "objetivo": "MAX_UTILIZATION",
+   "motor": "SPARROW",
+   "pecas": 22,
+   "tempo_s": 736.5,
+   "g00_m": 3.84,
+   "sobre_peca": 10,
+   "aprov_compacto": 68.17,
+   "maior_retalho_m2": 0.359,
+   "alternativas": 6,
+   "valido": true
+  },
+  {
+   "caso": "Modelo 1",
+   "objetivo": "MIN_MACHINE_TIME",
+   "motor": "SPARROW",
+   "pecas": 22,
+   "tempo_s": 738.4,
+   "g00_m": 4.46,
+   "sobre_peca": 9,
+   "aprov_compacto": 68.7,
+   "maior_retalho_m2": 0.376,
+   "alternativas": 6,
+   "valido": true
+  },
+  {
+   "caso": "Modelo 3",
+   "objetivo": "MAX_UTILIZATION",
+   "motor": "SPARROW",
+   "pecas": 12,
+   "tempo_s": 572,
+   "g00_m": 4.86,
+   "sobre_peca": 1,
+   "aprov_compacto": 32.68,
+   "maior_retalho_m2": 0.667,
+   "alternativas": 6,
+   "valido": true
+  },
+  {
+   "caso": "Modelo 3",
+   "objetivo": "MIN_MACHINE_TIME",
+   "motor": "SPARROW",
+   "pecas": 12,
+   "tempo_s": 571.2,
+   "g00_m": 4.6,
+   "sobre_peca": 0,
+   "aprov_compacto": 32.68,
+   "maior_retalho_m2": 0.666,
+   "alternativas": 6,
+   "valido": true
+  }
+ ]
+}

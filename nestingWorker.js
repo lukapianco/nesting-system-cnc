@@ -1161,6 +1161,12 @@ function compareSolutions(cand, best, goal) {
     if (Math.abs(cand.stripLength - best.stripLength) > 1e-6 * SHEET_W) return best.stripLength - cand.stripLength;
     return best.gravityCenterTerm - cand.gravityCenterTerm;
   }
+  if (goal === 'MIN_MACHINE_TIME') {
+    // menos tempo de máquina (estimado: corte, perfurações, deslocamento em vazio); sem CAM ainda, compacidade
+    const tc = cand.cam && cand.cam.timeEstimate, tb = best.cam && best.cam.timeEstimate;
+    if (tc && tb && Math.abs(tc.totalS - tb.totalS) > 0.5) return tb.totalS - tc.totalS;
+    if (tc && tb && Math.abs(cand.cam.metrics.rapidCrossings - best.cam.metrics.rapidCrossings) > 0) return best.cam.metrics.rapidCrossings - cand.cam.metrics.rapidCrossings;
+  }
   if (goal === 'MIN_BOUNDING_BOX') {
     if (Math.abs(cand.boundingBoxArea - best.boundingBoxArea) > 1) {
       return best.boundingBoxArea - cand.boundingBoxArea;
@@ -1355,8 +1361,12 @@ function runHybridMetaheuristicLoop(engineNote = null, opts = {}) {
     // Recorde: pontua com a métrica rápida; só os promissores pagam a varredura fina de retalhos
     let isNewRecord = false;
     const cmpFast = compareSolutions(res, bestResult ? metricsOf(bestResult) : null, goal);
-    if (cmpFast > 0 || (cmpFast === 0 && rng() < 0.05)) {
+    // objetivo "menos tempo de máquina": empate em peças e área paga o planejamento de corte (1 em 4, pelo custo)
+    const timeTie = goal === 'MIN_MACHINE_TIME' && bestResult && res.placedParts.length === bestResult.placedParts.length &&
+      Math.abs(res.usedArea - bestResult.usedArea) <= 0.5 && rng() < 0.25;
+    if (cmpFast > 0 || (cmpFast === 0 && rng() < 0.05) || timeTie) {
       upgradeToFull(res);
+      if (goal === 'MIN_MACHINE_TIME') planCam(res, params);
       if (compareSolutions(res, bestResult, goal) > 0) {
         bestResult = res;
         currentSAOrder = [...candidateOrder];

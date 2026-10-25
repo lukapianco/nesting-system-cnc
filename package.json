@@ -1,13 +1,13 @@
 {
   "name": "prumo",
-  "version": "5.8.0",
+  "version": "5.9.0",
   "description": "Prumo — motor de nesting 2D (true shape) com leitura robusta de DXF, validação independente e CAM",
   "main": "index.js",
   "scripts": {
     "start": "node .",
     "dev": "node .",
     "build:sparrow": "cargo build --release --manifest-path native/prumo-sparrow/Cargo.toml",
-    "test": "node test/run.js && node test/dxf_doctor.js && node test/engine_units.js && node test/engine_sparrow.js && node test/client_smoke.js",
+    "test": "node test/run.js && node test/dxf_doctor.js && node test/engine_units.js && node test/engine_sparrow.js && node test/multi_sheet.js && node test/cam_time.js && node test/client_smoke.js",
     "test:ui": "node test/ui_e2e.js",
     "bench:public": "node bench/public/run.js"
   },

@@ -54,6 +54,8 @@ try { ({ chromium } = require('playwright')); } catch (_) { console.log('  - pla
   await check('"Parar e manter o melhor" entrega layout validado e exportável', async () => {
     assert(/APROVADO/.test(await text('#metricValidation')));
     assert(!(await page.isDisabled('#btnExportDxf')));
+    assert(/\d+ (s|min)/.test(await text('#metricMachineTime')), 'tempo de máquina: ' + await text('#metricMachineTime'));
+    assert(/vez|nenhum/.test(await text('#metricCrossings')), await text('#metricCrossings'));
   });
   await check('motor usado aparece na tela (sparrow instalado → "Otimizador sparrow"; senão, aviso de não instalado)', async () => {
     const hw = await (await fetch(base + '/api/hardware')).json();
