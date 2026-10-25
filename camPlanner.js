@@ -281,7 +281,7 @@ function candidatesForRing(ctx, ring, ownKey) {
         const open = !relaxed && v.clear >= ctx.openClear && edgeD >= ctx.edgeOpen && !remnantHit;
         const quality = Math.min(v.clear, 12) + Math.min(e.len, 20) * 0.15
           + (type === params.lead_in_type ? 1 : 0) + (L === lengths[0] ? 1 : 0) - (remnantHit ? 10 : 0);
-        return { entry: E, t, n, leadPath: path, leadType: type, leadLen: L, pierce: path[0], clear: v.clear, quality, tier: open ? 0 : 1, invalid: !!relaxed };
+        return { entry: E, t, n, edgeIndex: e.i, frac, leadPath: path, leadType: type, leadLen: L, pierce: path[0], clear: v.clear, quality, tier: open ? 0 : 1, invalid: !!relaxed };
       }
     }
     return null;
@@ -354,7 +354,7 @@ function planCam(res, params) {
 
   /** Gera a sequência completa para uma ORDEM de peças mães. */
   function runSequence(order, forced = null) {
-    const seq = [], rapids = [], usedPierces = [], finished = [], groups = [], opsOrder = [];
+    const seq = [], rapids = [], usedPierces = [], finished = [], groups = [], opsOrder = [], chosen = [];
     let pos = home, rapidLen = 0, cutLen = 0, crossings = 0, invalid = 0, narrow = 0, closePierces = 0;
     const warn = new Set();
 
@@ -382,6 +382,7 @@ function planCam(res, params) {
         if (sc < bestScore) { bestScore = sc; best = c; }
       }
       opsOrder.push(op);
+      chosen.push(best);
       if (spacingPenalty(best) > 0) closePierces++;
       const crosses = crossesFinished(pos, best.pierce);
       rapids.push({ x1: pos.x, y1: pos.y, x2: best.pierce.x, y2: best.pierce.y, crossesCut: crosses });
@@ -419,7 +420,7 @@ function planCam(res, params) {
         groups.push({ host, start: seq[startIdx].pierce, end: seq[seq.length - 1].entry });
       }
     }
-    return { seq, rapids, rapidLen, cutLen, crossings, invalid, narrow, closePierces, warnings: warn, groups, opsOrder };
+    return { seq, rapids, rapidLen, cutLen, crossings, invalid, narrow, closePierces, warnings: warn, groups, opsOrder, chosen };
   }
 
   // 1) ordem inicial: várias estratégias, fica a de menor custo real (G00 + penalidade por passar sobre peça solta)
@@ -540,6 +541,9 @@ function planCam(res, params) {
     if (scoreOf(refined) < scoreOf(result) - 1e-6 && refined.closePierces <= result.closePierces && refined.invalid <= result.invalid) result = refined;
   }
 
+  // 4) acabamento do corte (V5.10, passo 4 do plano; NÃO testado em máquina): sobrepasse, saída e microjuntas
+  const finishing = applyFinishing(ctx, result, params, home, skipCrossCheck);
+  for (const w of finishing.warnings) warnings.push(w);
   const { seq, rapids } = result;
   for (const w of result.warnings) warnings.push(w);
 
@@ -559,9 +563,15 @@ function planCam(res, params) {
     ops: seq,
     rapids,
     warnings: [...new Set(warnings)].slice(0, 20),
-    timeEstimate: estimateMachineTime({ cutLength: result.cutLen, leadLength: leadLen, rapidLength: result.rapidLen, pierceCount: seq.length }, params),
+    finishing: finishing.settings,
+    timeEstimate: estimateMachineTime({ cutLength: result.cutLen - finishing.tabLen + finishing.overburnLen, leadLength: leadLen + finishing.leadOutLen, rapidLength: result.rapidLen, pierceCount: seq.length }, params),
     metrics: {
       leadLength: +leadLen.toFixed(1),
+      leadOutLength: +finishing.leadOutLen.toFixed(1),
+      overburnLength: +finishing.overburnLen.toFixed(1),
+      tabCount: finishing.tabCount,
+      tabLength: +finishing.tabLen.toFixed(1),
+      leadOutsWithoutSpace: finishing.noSpace,
       pierceCount: seq.length,
       cutLength: +result.cutLen.toFixed(1),
       rapidLength: +result.rapidLen.toFixed(1),
@@ -572,6 +582,147 @@ function planCam(res, params) {
     }
   };
   return res.cam;
+}
+
+// ---------------------------------------------------------------- acabamento do corte (V5.10)
+/** Ponto e tangente a uma distância `s` (ao longo do anel, no sentido do corte) a partir da aresta i, fração f. */
+function walkRing(ring, i, f, s) {
+  const n = ring.length;
+  let a = ring[i], b = ring[(i + 1) % n];
+  let len = Math.hypot(b.x - a.x, b.y - a.y);
+  let pos = f * len, k = i, guard = 0;
+  const pts = [{ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f }];
+  let left = s;
+  while (left > 1e-9 && guard++ < 4 * n) {
+    const rest = len - pos;
+    if (rest >= left) {
+      pos += left; left = 0;
+      pts.push({ x: a.x + (b.x - a.x) * (pos / len), y: a.y + (b.y - a.y) * (pos / len) });
+      break;
+    }
+    left -= rest;
+    pts.push({ x: b.x, y: b.y });
+    k = (k + 1) % n; a = ring[k]; b = ring[(k + 1) % n];
+    len = Math.hypot(b.x - a.x, b.y - a.y) || 1e-9; pos = 0;
+  }
+  const t = { x: (b.x - a.x) / (len || 1), y: (b.y - a.y) / (len || 1) };
+  return { pts, end: pts[pts.length - 1], t, n: { x: t.y, y: -t.x }, edge: k };
+}
+
+/** Distância ao longo do anel do início do anel até (aresta i, fração f). */
+function arcPos(ring, i, f) {
+  let s = 0;
+  for (let k = 0; k < i; k++) s += Math.hypot(ring[k + 1].x - ring[k].x, ring[k + 1].y - ring[k].y);
+  const a = ring[i], b = ring[(i + 1) % ring.length];
+  return s + f * Math.hypot(b.x - a.x, b.y - a.y);
+}
+
+/** Converte posição ao longo do anel em (aresta, fração). */
+function locate(ring, s, P) {
+  let x = ((s % P) + P) % P;
+  for (let k = 0, n = ring.length; k < n; k++) {
+    const a = ring[k], b = ring[(k + 1) % n];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    if (x <= len || k === n - 1) return { i: k, f: len > 0 ? Math.min(1, x / len) : 0, len };
+    x -= len;
+  }
+  return { i: 0, f: 0, len: 0 };
+}
+
+/**
+ * Sobrepasse (overburn): o corte passa do ponto de entrada por `overburn_length` mm, ao longo do contorno, para
+ * fechar sem marca. Saída (lead-out): sai do contorno para a sucata, em arco ou reta, com `lead_out_length` mm; se
+ * não houver espaço livre, tenta a metade e, por fim, sai sem saída (aviso). Microjuntas (tabs): trechos de
+ * `tab_width` mm NÃO cortados no contorno externo, `tabs_per_part` por peça, distribuídos ao longo do perímetro
+ * longe da entrada e de preferência em arestas retas; só em peças até `tab_max_part_size` mm (0 = todas).
+ * Furos não recebem microjunta (o miolo tem que cair). Nada disso foi testado em máquina.
+ */
+function applyFinishing(ctx, result, params, home, skipCrossCheck) {
+  const out = { warnings: [], leadOutLen: 0, overburnLen: 0, tabLen: 0, tabCount: 0, noSpace: 0,
+    settings: { lead_out_length: params.lead_out_length, overburn_length: params.overburn_length, tab_width: params.tab_width,
+      tabs_per_part: params.tabs_per_part, tab_max_part_size: params.tab_max_part_size, testedOnMachine: false } };
+  const wantOut = params.lead_out_length > 0.01, wantOb = params.overburn_length > 0.01, wantTabs = params.tab_width > 0.01 && params.tabs_per_part > 0;
+  if (!wantOut && !wantOb && !wantTabs) return out;
+  const { seq, opsOrder, chosen } = result;
+  for (let i = 0; i < seq.length; i++) {
+    const op = opsOrder[i], c = chosen[i], s = seq[i];
+    if (!c || c.edgeIndex == null) continue;
+    const ring = op.ring, P = op.perimeter;
+    // sobrepasse ao longo do contorno, no sentido do corte
+    let exitPt = c.entry, exitT = c.t, exitN = c.n, overPath = null;
+    if (wantOb) {
+      const w = walkRing(ring, c.edgeIndex, c.frac, Math.min(params.overburn_length, P * 0.25));
+      overPath = w.pts; exitPt = w.end; exitT = w.t; exitN = w.n;
+      out.overburnLen += Math.min(params.overburn_length, P * 0.25);
+      s.overburnPath = overPath;
+    }
+    // saída para a sucata (o caminho é validado como uma entrada ao contrário)
+    if (wantOut) {
+      let done = false;
+      for (const L of [params.lead_out_length, params.lead_out_length * 0.5]) {
+        const back = makeLead(params.lead_in_type, exitPt, { x: -exitT.x, y: -exitT.y }, exitN, L);
+        const v = validateLead(ctx, back, exitPt, op.ownKey, ring);
+        if (!v.ok) continue;
+        const path = back.slice().reverse();
+        s.leadOutPath = path;
+        for (let k = 1; k < path.length; k++) out.leadOutLen += Math.hypot(path[k].x - path[k - 1].x, path[k].y - path[k - 1].y);
+        done = true;
+        break;
+      }
+      if (!done) { out.noSpace++; out.warnings.push(`Saída de corte sem espaço livre em ${op.item.part.name}${op.kind === 'HOLE' ? ' (furo)' : ''}: sai sem saída`); }
+    }
+    // microjuntas no contorno externo de peças pequenas o bastante
+    if (wantTabs && op.kind === 'OUTER') {
+      const part = op.item.part;
+      const big = Math.max(part.placedWidth || 0, part.placedHeight || 0);
+      if (params.tab_max_part_size > 0 && big > params.tab_max_part_size) continue;
+      const k = Math.min(params.tabs_per_part, Math.floor(P / (4 * params.tab_width)));
+      if (k < 1) continue;
+      const sE = arcPos(ring, c.edgeIndex, c.frac);
+      const tw = params.tab_width, tabs = [];
+      for (let j = 0; j < k; j++) {
+        let target = sE + (P * (j + 1)) / (k + 1);
+        // prefere aresta reta com folga para a junta: procura a aresta longa mais próxima (até 1/(2k) do perímetro)
+        let loc = locate(ring, target, P);
+        if (loc.len < 2 * tw) {
+          let best = null;
+          for (let d = 1; d <= ring.length; d++) {
+            for (const sign of [1, -1]) {
+              const idx = ((loc.i + sign * d) % ring.length + ring.length) % ring.length;
+              const a = ring[idx], b = ring[(idx + 1) % ring.length];
+              if (Math.hypot(b.x - a.x, b.y - a.y) >= 2 * tw) { best = idx; break; }
+            }
+            if (best != null) break;
+          }
+          if (best != null) {
+            const center = arcPos(ring, best, 0.5);
+            const dist = Math.min(Math.abs(center - target), P - Math.abs(center - target));
+            if (dist <= P / (2 * k)) { target = center; loc = locate(ring, target, P); }
+          }
+        }
+        const w = walkRing(ring, loc.i, loc.f, 0);
+        const a = walkRing(ring, locate(ring, target - tw / 2, P).i, locate(ring, target - tw / 2, P).f, tw);
+        tabs.push({ start: a.pts[0], end: a.end, path: a.pts, center: w.end });
+      }
+      if (tabs.length) {
+        s.tabs = tabs; out.tabCount += tabs.length; out.tabLen += tabs.length * tw;
+      }
+    }
+  }
+  // os deslocamentos agora saem do fim da saída (ou do sobrepasse), não do ponto de entrada
+  let pos = home, rapidLen = 0, crossings = 0;
+  const rapids = [], finished = [];
+  for (let i = 0; i < seq.length; i++) {
+    const s = seq[i];
+    const crosses = !skipCrossCheck && finished.some((f) => segmentCrossesRing(pos, s.pierce, f));
+    rapids.push({ x1: pos.x, y1: pos.y, x2: s.pierce.x, y2: s.pierce.y, crossesCut: crosses });
+    rapidLen += Math.hypot(s.pierce.x - pos.x, s.pierce.y - pos.y);
+    if (crosses) crossings++;
+    if (s.kind === 'OUTER') finished.push(opsOrder[i].ring);
+    pos = s.leadOutPath ? s.leadOutPath[s.leadOutPath.length - 1] : (s.overburnPath ? s.overburnPath[s.overburnPath.length - 1] : s.entry);
+  }
+  result.rapids = rapids; result.rapidLen = rapidLen; result.crossings = crossings;
+  return out;
 }
 
 /**

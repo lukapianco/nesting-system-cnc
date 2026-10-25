@@ -28,12 +28,66 @@ const LAYERS = [
   { name: '2_CORTE_FUROS', color: 2, role: 'cut' },
   { name: '3_RETALHOS_UTEIS', color: 6, role: 'remnant' },
   { name: '4_CAM_LEAD_IN', color: 1, role: 'cam' },
-  { name: '5_TEXTO_PECAS', color: 8, role: 'text' }
+  { name: '5_TEXTO_PECAS', color: 8, role: 'text' },
+  // V5.10 (ADR 011; NÃO testado em máquina): saída de corte + sobrepasse, e marcas das microjuntas
+  { name: '6_CAM_SAIDA', color: 1, role: 'cam' },
+  { name: '7_MICROJUNTAS', color: 4, role: 'cam' }
 ];
 const LAYER_ROLE = Object.fromEntries(LAYERS.map(l => [l.name, l.role]));
 
 /** Opções padrão: só geometria de corte (lida corretamente por qualquer sistema). */
-const DEFAULT_EXPORT = { includeSheet: false, includeRemnants: false, includeLeadIn: false, includeLabels: false };
+const DEFAULT_EXPORT = { includeSheet: false, includeRemnants: false, includeLeadIn: false, includeLabels: false, includeLeadOut: false, includeTabs: false, openAtTabs: false };
+
+// ---- contorno aberto nas microjuntas (opção openAtTabs) ----
+function ringLen(ring) { let s = 0; for (let i = 0; i < ring.length; i++) { const a = ring[i], b = ring[(i + 1) % ring.length]; s += Math.hypot(b.x - a.x, b.y - a.y); } return s; }
+/** Posição ao longo do anel do ponto mais próximo de p. */
+function projectOnRing(ring, p) {
+  let best = Infinity, bestS = 0, acc = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length];
+    const dx = b.x - a.x, dy = b.y - a.y, l2 = dx * dx + dy * dy, len = Math.sqrt(l2);
+    const t = l2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+    const d = (p.x - a.x - t * dx) ** 2 + (p.y - a.y - t * dy) ** 2;
+    if (d < best) { best = d; bestS = acc + t * len; }
+    acc += len;
+  }
+  return bestS;
+}
+/** Trecho do anel de s0 a s1 (no sentido dos índices, dando a volta se preciso). */
+function ringSlice(ring, s0, s1, P) {
+  const span = ((s1 - s0) % P + P) % P;
+  const pts = [];
+  let acc = 0, started = false;
+  for (let lap = 0; lap < 2 && (!started || acc < s0 + span + 1e-9); lap++) {
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const segA = acc, segB = acc + len;
+      const from = Math.max(segA, s0), to = Math.min(segB, s0 + span);
+      if (to >= from && len > 0) {
+        const pa = { x: a.x + (b.x - a.x) * ((from - segA) / len), y: a.y + (b.y - a.y) * ((from - segA) / len) };
+        const pb = { x: a.x + (b.x - a.x) * ((to - segA) / len), y: a.y + (b.y - a.y) * ((to - segA) / len) };
+        if (!started) { pts.push(pa); started = true; }
+        pts.push(pb);
+      }
+      acc = segB;
+      if (started && acc >= s0 + span) break;
+    }
+  }
+  return pts;
+}
+/** Contorno partido nas microjuntas: lista de trechos abertos (o que de fato é cortado). */
+function splitAtTabs(ring, tabs) {
+  const P = ringLen(ring);
+  const iv = tabs.map(t => ({ a: projectOnRing(ring, t.start), b: projectOnRing(ring, t.end) })).sort((x, y) => x.a - y.a);
+  const pieces = [];
+  for (let k = 0; k < iv.length; k++) {
+    const from = iv[k].b, to = iv[(k + 1) % iv.length].a;
+    const piece = ringSlice(ring, from, to, P);
+    if (piece.length >= 2) pieces.push(piece);
+  }
+  return pieces;
+}
 
 function fmt(v) {
   const n = Math.round(Number(v) * 10000) / 10000;
@@ -123,10 +177,15 @@ function buildDxf(layout, opts = {}) {
   const ringLayer = (part, kind) =>
     kind === 'HOLE' ? '2_CORTE_FUROS' : (part.nestedInsideHole ? '1_PECA_IN_HOLE' : '1_CORTE_PECAS');
 
-  const emitRing = (part, kind, holeId) => {
+  const emitRing = (part, kind, holeId, tabs) => {
     const key = `${part.id}|${kind}|${holeId || ''}`;
     if (emittedRings.has(key)) return;
     emittedRings.add(key);
+    if (o.openAtTabs && kind === 'OUTER' && tabs && tabs.length) {
+      // contorno aberto nas juntas: só o que a máquina corta (opção; outros sistemas podem ler como contorno aberto)
+      for (const piece of splitAtTabs(absPts(part, part.placedPoints), tabs)) b.polyline(ringLayer(part, 'OUTER'), piece, false);
+      return;
+    }
     if (kind === 'HOLE') {
       const h = (part.placedHoles || []).find((x) => x.id === holeId);
       if (h) b.polyline(ringLayer(part, 'HOLE'), absPts(part, h.placedPoints), true);
@@ -141,11 +200,17 @@ function buildDxf(layout, opts = {}) {
     for (const op of ops) {
       const part = partById.get(op.partId);
       if (!part) continue;
-      emitRing(part, op.kind, op.holeId);
+      emitRing(part, op.kind, op.holeId, op.tabs);
       if (includeLeadIn && op.leadPath && op.leadPath.length >= 2) {
         if (op.leadPath.length === 2) b.line('4_CAM_LEAD_IN', op.leadPath[0], op.leadPath[1]);
         else b.polyline('4_CAM_LEAD_IN', op.leadPath, false);
       }
+      if (o.includeLeadOut) {
+        const out = [...(op.overburnPath || []), ...((op.leadOutPath || []).slice(op.overburnPath ? 1 : 0))];
+        if (out.length === 2) b.line('6_CAM_SAIDA', out[0], out[1]);
+        else if (out.length > 2) b.polyline('6_CAM_SAIDA', out, false);
+      }
+      if (o.includeTabs) for (const t of op.tabs || []) b.polyline('7_MICROJUNTAS', t.path, false);
     }
   }
   // Garante que nenhuma peça fique de fora mesmo sem plano CAM

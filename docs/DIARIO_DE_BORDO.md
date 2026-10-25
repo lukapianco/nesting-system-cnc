@@ -2,6 +2,25 @@
 
 Registro do que foi feito, por quê e como foi verificado. Base para o relatório do PROMPT 2.
 
+## Sessão V5.10 — passo 4: acabamento do corte e relatório em PDF
+
+Pedido: decidir a numeração (sem dados para dizer que é a v6) e fazer o passo 4, CAM sem máquina.
+
+### Decisões
+* Numeração: correção sobe o terceiro número, função nova o segundo; 6.0 só com os obrigatórios da v6 e teste em campo.
+  Por isso esta é a 5.10.0 (não 5.9.1).
+* Saída, sobrepasse e microjuntas começam desligados; validados pelo validador independente; marcados como não
+  testados em máquina na tela, no DXF (documento do formato) e no rodapé do PDF.
+* PDF escrito à mão para não depender de pacote (o servidor da empresa pode não ter acesso à internet para instalar).
+
+### Erros meus nesta sessão (corrigidos antes da entrega)
+* O teste do DXF aberto nas microjuntas contava só a camada `1_CORTE_PECAS` e esqueceu as peças dentro de furos
+  (`1_PECA_IN_HOLE`), que também recebem microjunta.
+* O teste do validador montava a saída adulterada mas só conferia o erro de microjunta; agora confere os dois.
+
+### Verificação
+* `npm test` com e sem o executável; `test/ui_e2e.js`; PDF aberto com `pdftoppm`/`qpdf --check` (sem erros).
+
 ## Sessão V5.9 — passo 3: sequência de corte e tempo de máquina
 
 Pedido: com o ok do usuário, fazer o tempo de máquina como passo 3 (o CAM sem máquina virou o passo 4), sem dados

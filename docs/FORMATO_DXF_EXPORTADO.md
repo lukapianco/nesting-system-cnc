@@ -23,6 +23,13 @@ Vale para `POST /api/export-dxf` (botão **Baixar .DXF de corte**) e `POST /api/
 | `3_RETALHOS_UTEIS` | retângulos de retalho útil | referência / estoque | opcional |
 | `4_CAM_LEAD_IN` | entradas de corte (linhas/arcos **abertos**) | CAM | opcional |
 | `5_TEXTO_PECAS` | `TEXT` com o nome da peça (ou medidas do retalho) | anotação | opcional |
+| `6_CAM_SAIDA` | sobrepasse + saída de corte de cada contorno (linhas/arcos **abertos**; V5.10, não testado em máquina) | CAM | opcional |
+| `7_MICROJUNTAS` | trecho do contorno externo que NÃO é cortado, uma polilinha aberta por microjunta (V5.10) | CAM | opcional |
+
+**Contorno aberto nas microjuntas (opção, V5.10):** com "Abrir o contorno nas microjuntas", o contorno externo de
+cada peça com microjunta sai em `1_CORTE_PECAS`/`1_PECA_IN_HOLE` como **trechos abertos** (só o que a máquina corta).
+Use apenas se o CAM da máquina espera isso: um sistema que classifica peças por contenção vai ler esses trechos como
+"contornos que não fecharam". O padrão continua sendo o contorno fechado, com as microjuntas (se pedidas) na camada 7.
 
 **Por que o padrão é só corte:** um sistema que classifica peças por contenção (par/ímpar), sem olhar a camada,
 lê o contorno da chapa como **uma peça gigante com todas as peças como furos**, os retalhos como peças e os lead-ins como

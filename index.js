@@ -13,6 +13,7 @@ const { normalizeNestingParams } = require('./typesAndInterfaces');
 const { buildJob } = require('./jobBuilder');
 const { buildSampleDxf } = require('./presets');
 const { buildDxf, buildRemnantsDxf } = require('./dxfWriter');
+const { buildReportPdf } = require('./pdfReport');
 const { findSparrowBinary } = require('./engine/sparrowBridge');
 const { buildStock, runMultiSheet, summarizeMulti } = require('./engine/multiSheet');
 const { recommendParams, listProcesses } = require('./processProfiles');
@@ -425,6 +426,22 @@ app.post('/api/export-dxf', (req, res) => {
     res.send(dxf);
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// Relatório de corte em PDF (V5.10): uma página por chapa (e um resumo, se forem várias)
+app.post('/api/report-pdf', (req, res) => {
+  try {
+    const { sheets, meta = {} } = req.body || {};
+    if (!Array.isArray(sheets) || !sheets.length || sheets.length > 60) return res.status(400).json({ error: 'Lista de chapas inválida.' });
+    const pdf = buildReportPdf(sheets.map(s => ({ layout: s.layout, label: String(s.label || '').slice(0, 80) })), {
+      fileName: String(meta.fileName || '').slice(0, 120), date: new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }), summary: meta.summary || null
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="relatorio_corte.pdf"');
+    res.send(pdf);
+  } catch (e) {
+    res.status(400).json({ error: e.message });
   }
 });
 

@@ -2,7 +2,7 @@
 
 > *Prumo* é o nome do motor de nesting (antes "Motor Industrial de True Shape 2D Nesting", V5.x). A API e os arquivos não mudaram de nome.
 
-**Versão do sistema:** 5.9 · **Público:** (A) operador / programador de corte · (B) profissional que faz a implantação na empresa cliente
+**Versão do sistema:** 5.10 · **Público:** (A) operador / programador de corte · (B) profissional que faz a implantação na empresa cliente
 
 > **Como ler este manual.** Quem só vai operar o sistema lê os capítulos 1 a 8 e usa o 12 (problemas) como consulta.
 > Quem vai implantar na empresa lê tudo, principalmente o capítulo 13 (roteiro de implantação).
@@ -213,7 +213,21 @@ Convenção: **[Padrão]** é o valor inicial da tela. "Aumenta/diminui" descrev
 | **Tipo de Lead-in** | — | **Arco tangente** (recomendado, melhor acabamento) · **Reta a 45°** · **Reta perpendicular**. Se o tipo escolhido não couber, o sistema tenta os outros e, depois, um comprimento 40% menor. |
 | **Cratera Pierce** [1,0] | mm | Raio de dano da perfuração. O ponto de perfuração fica a ≥ **raio + Kerf/2 + 0,3 mm** de qualquer contorno de peça e as perfurações ficam a ≥ **2 × raio + 1 mm** entre si. **Aumente** em chapa grossa e em jato d'água com material frágil. |
 
-### 5.4.1 Tempo de máquina (estimativa, V5.9)
+### 5.4.1 Acabamento do corte (V5.10, não testado em máquina)
+
+No passo **3 Corte**, em **Acabamento do corte (não testado em máquina)**. Tudo começa em 0 (desligado).
+
+| Campo | O que faz |
+|---|---|
+| **Saída de corte (mm)** | Depois de fechar o contorno, a cabeça sai para a sucata (arco ou reta, como a entrada), para não deixar marca no ponto final. Se não houver espaço livre, tenta a metade; se nem assim, sai sem saída e a tela avisa. |
+| **Sobrepasse (mm)** | O corte passa do ponto de entrada este tanto, ao longo do contorno, para fechar sem rebarba. |
+| **Microjunta (mm)** | Trecho do contorno externo que **não** é cortado, para a peça não cair nem tombar na grelha. Furos não recebem. |
+| **Microjuntas por peça** | Quantas, espalhadas pelo contorno, longe da entrada e de preferência em trechos retos. |
+| **Só em peças até (mm)** | Só peças com o maior lado até esta medida recebem microjunta (0 = todas). |
+
+Na mesa, a saída aparece tracejada em vermelho e a microjunta como um traço claro sobre o contorno. O validador confere que a saída fica em sucata e que cada microjunta está sobre o contorno da peça. Na exportação, **Saídas de corte e sobrepasse** e **Marcas das microjuntas** vão em camadas próprias; **Abrir o contorno nas microjuntas** só serve se o CAM da sua máquina espera o contorno já aberto (veja `docs/FORMATO_DXF_EXPORTADO.md`). **Antes de usar em produção, confira no primeiro corte de cada material e espessura.**
+
+### 5.4.2 Tempo de máquina (estimativa, V5.9)
 
 No passo **3 Corte**, em **Tempo de máquina (estimativa)**: **Velocidade de corte** (mm/min), **Tempo por perfuração** (s) e **Velocidade em vazio** (mm/min). Os valores que vêm preenchidos (3.000, 1 e 20.000) são só ponto de partida: **troque pelos da tabela de corte da sua máquina** para o tempo valer. A conta é corte (contornos + entradas) ÷ velocidade de corte + perfurações × tempo por perfuração + deslocamento em vazio ÷ velocidade em vazio; não conta aceleração, cantos nem troca de chapa.
 
@@ -474,6 +488,8 @@ Layout **REPROVADO** bloqueia a exportação. Isso é de propósito: é melhor p
 | `3_RETALHOS_UTEIS` | Retângulos de sobra. | opcional |
 | `4_CAM_LEAD_IN` | Linhas/arcos de entrada. | opcional |
 | `5_TEXTO_PECAS` | Nome de cada peça (texto). | opcional |
+| `6_CAM_SAIDA` | Sobrepasse + saída de cada contorno (V5.10). | opcional |
+| `7_MICROJUNTAS` | Trecho não cortado de cada microjunta (V5.10). | opcional |
 
 > **Por que o padrão mudou (V5.4).** Outros sistemas que identificam peças num DXF por contenção (sem olhar camada)
 > liam o contorno da chapa como **uma peça gigante com as peças como furos**, os retalhos como peças e os lead-ins como
@@ -482,6 +498,10 @@ Layout **REPROVADO** bloqueia a exportação. Isso é de propósito: é melhor p
 
 **Baixar .DXF dos retalhos:** arquivo separado com cada retalho útil como contorno fechado + texto de medidas, para
 cadastrar as sobras no estoque. Retalhos respeitam a mesma folga D_nom das peças (podem ser recortados sem atingir peça).
+
+### 10.1.1 Relatório em PDF (V5.10)
+
+**Baixar relatório (PDF)** gera uma página por chapa: o desenho com a ordem de corte, as entradas, as saídas, as microjuntas e os retalhos; os números do plano; o tempo estimado; os retalhos para o estoque; e a lista de peças. Com várias chapas, a primeira página é o resumo do conjunto. É o documento do operador e do histórico; o arquivo da máquina continua sendo o DXF.
 
 ### 10.2 O que o arquivo **não** contém (importante)
 

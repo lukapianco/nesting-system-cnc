@@ -12,7 +12,7 @@
     <div class="brand" title="Prumo — motor de nesting">
       <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4v16" /><path d="M16 20l-5 6h10z" class="fill" /></svg>
       <span class="brand-name">Prumo</span>
-      <span class="brand-version">5.9</span>
+      <span class="brand-version">5.10</span>
     </div>
     <div class="job-line" id="jobLine">Nenhum desenho carregado</div>
     <div class="topbar-actions">
@@ -214,6 +214,32 @@
           <label class="check"><input type="checkbox" id="enableInHole" checked /><span>Aproveitar furos grandes para outras peças</span></label>
           <label class="check muted"><input type="checkbox" id="commonLineInput" disabled /><span>Corte de linha comum (ainda não disponível)</span></label>
           <details class="sub">
+            <summary>Acabamento do corte (não testado em máquina)</summary>
+            <p class="note">Tudo começa desligado (0). Confira no primeiro corte de cada material antes de usar em produção.</p>
+            <div class="grid2">
+              <div class="field">
+                <label for="leadOutInput" title="Saída do contorno para a sucata, no mesmo tipo da entrada (arco ou reta). Evita a marca no ponto onde o corte termina.">Saída de corte (mm)</label>
+                <input type="number" id="leadOutInput" value="0" min="0" max="50" step="0.5" />
+              </div>
+              <div class="field">
+                <label for="overburnInput" title="O corte passa do ponto de entrada este tanto, para fechar o contorno sem rebarba.">Sobrepasse (mm)</label>
+                <input type="number" id="overburnInput" value="0" min="0" max="20" step="0.1" />
+              </div>
+              <div class="field">
+                <label for="tabWidthInput" title="Trecho do contorno externo que NÃO é cortado, para a peça não cair nem tombar na grelha. 0 = sem microjunta.">Microjunta (mm)</label>
+                <input type="number" id="tabWidthInput" value="0" min="0" max="10" step="0.1" />
+              </div>
+              <div class="field">
+                <label for="tabsPerPartInput">Microjuntas por peça</label>
+                <input type="number" id="tabsPerPartInput" value="2" min="1" max="12" step="1" />
+              </div>
+              <div class="field">
+                <label for="tabMaxPartInput" title="Só peças com o maior lado até esta medida recebem microjunta. 0 = todas.">Só em peças até (mm)</label>
+                <input type="number" id="tabMaxPartInput" value="0" min="0" step="10" />
+              </div>
+            </div>
+          </details>
+          <details class="sub">
             <summary>Tempo de máquina (estimativa)</summary>
             <p class="note">Valores de partida, não da sua máquina: troque pelos da tabela de corte para o tempo valer.</p>
             <div class="grid2">
@@ -337,6 +363,7 @@
           <span><i class="sw sw-scrap"></i>furo sem aproveitamento</span>
           <span><i class="sw sw-remnant"></i>retalho</span>
           <span><i class="sw sw-lead"></i>entrada de corte</span>
+          <span><i class="sw sw-tab"></i>microjunta</span>
         </span>
         <span class="view-toggles">
           <label class="check inline"><input type="checkbox" id="showRemnants" checked /><span>retalhos</span></label>
@@ -413,7 +440,11 @@
         <label class="check"><input type="checkbox" id="exportIncludeRemnants" /><span>Retalhos</span></label>
         <label class="check"><input type="checkbox" id="exportIncludeLeadIn" /><span>Entradas de corte</span></label>
         <label class="check"><input type="checkbox" id="exportIncludeLabels" /><span>Nomes das peças</span></label>
+        <label class="check"><input type="checkbox" id="exportIncludeLeadOut" /><span>Saídas de corte e sobrepasse</span></label>
+        <label class="check"><input type="checkbox" id="exportIncludeTabs" /><span>Marcas das microjuntas</span></label>
+        <label class="check" title="Só se o CAM da sua máquina espera o contorno já aberto nas juntas: outros sistemas leem isso como contorno aberto."><input type="checkbox" id="exportOpenAtTabs" /><span>Abrir o contorno nas microjuntas</span></label>
         <button id="btnExportDxf" class="btn btn-primary btn-block">Baixar DXF de corte</button>
+        <button id="btnReportPdf" class="btn btn-block" title="Desenho de cada chapa com a ordem de corte, os números do plano, os retalhos e a lista de peças.">Baixar relatório (PDF)</button>
         <button id="btnExportAllDxf" class="btn btn-block hidden" title="Um DXF de corte para cada chapa do conjunto.">Baixar DXF de todas as chapas</button>
         <button id="btnExportRemnantsDxf" class="btn btn-quiet btn-block" title="Cada retalho como contorno fechado com as medidas, para cadastrar no estoque.">Baixar DXF dos retalhos</button>
         </div>

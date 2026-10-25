@@ -1,3 +1,32 @@
+# V5.10 — acabamento do corte (saída, sobrepasse, microjuntas) e relatório em PDF (passo 4)
+
+**Numeração a partir daqui:** 5.x.y com o terceiro número só para correções; funções novas sobem o segundo (5.10,
+5.11…); a 6.0 fica para quando os itens obrigatórios da v6 estiverem feitos e o motor tiver passado por teste em campo.
+
+## Acabamento do corte — ADR 011 (NÃO testado em máquina)
+* **Saída de corte (lead-out):** do contorno para a sucata, em arco ou reta (o tipo da entrada), validada como uma
+  entrada ao contrário; sem espaço, tenta a metade, e por fim avisa.
+* **Sobrepasse (overburn):** o corte passa do ponto de entrada o tanto pedido, para fechar sem marca.
+* **Microjuntas:** trechos do contorno externo que não são cortados, N por peça, longe da entrada e de preferência em
+  arestas retas; opção de aplicar só em peças até um tamanho. Furos não recebem.
+* Tudo começa em 0 (desligado): sem pedir, nada muda.
+* Validador independente: saída sobre peça ou fora da chapa e microjunta fora do contorno ou com outra largura são
+  erros; contorno sem espaço para a saída é aviso.
+* DXF: camadas opcionais `6_CAM_SAIDA` e `7_MICROJUNTAS`; opção "Abrir o contorno nas microjuntas" para CAM que espera
+  o contorno aberto (o padrão continua fechado). Contrato atualizado em `docs/FORMATO_DXF_EXPORTADO.md`.
+* Tela: "Acabamento do corte (não testado em máquina)" no passo 3; na mesa, saída tracejada e microjunta como traço
+  claro sobre o contorno; legenda nova.
+
+## Relatório em PDF
+* "Baixar relatório (PDF)": uma página por chapa (desenho com ordem de corte, entradas, saídas, microjuntas e
+  retalhos; números do plano; tempo estimado; retalhos; lista de peças) e, com várias chapas, uma página de resumo.
+* `POST /api/report-pdf` para os softwares da empresa. Sem dependências: o PDF é escrito pelo próprio Prumo.
+
+## Testes
+* `test/cam_finish.js` (novo, 7): padrão desligado, opções ligadas aprovadas pelo validador, limite por tamanho de peça,
+  validador pegando saída sobre peça e microjunta fora do contorno, camadas e contorno aberto no DXF, PDF válido (páginas,
+  acentos, xref) e a rota da API.
+
 # V5.9 — sequência de corte melhor e tempo de máquina estimado (passo 3)
 
 ## Sequência de corte — ADR 010

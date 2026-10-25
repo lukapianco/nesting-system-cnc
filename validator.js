@@ -219,6 +219,32 @@ function validateLayout(res, params, ctx = {}) {
       if (op.invalid) { add(warnings, 'LEAD_IN_SEM_ESPACO', `Lead-in sem espaço validado em ${op.partName}.`, { partA: op.partId }); continue; }
       if (op.pierce && isMaterial(op.pierce)) add(errors, 'PIERCE_EM_MATERIAL', `Perfuração de ${op.partName} cairia sobre material de peça.`, { partA: op.partId });
     }
+    // V5.10: saída de corte (lead-out) só em sucata e dentro da chapa; microjunta sobre o contorno externo da própria
+    // peça e com a largura pedida (um erro aqui quer dizer que a máquina cortaria onde não deve)
+    const inSheet = (pt) => res.sheetPoly ? pip(pt, res.sheetPoly) : (pt.x >= 0 && pt.y >= 0 && pt.x <= res.sheetWidth && pt.y <= res.sheetHeight);
+    const partById = new Map(items.map((it) => [it.part.id, it]));
+    for (const op of res.cam.ops) {
+      const path = op.leadOutPath || [];
+      for (let i = 1; i < path.length; i++) {
+        const q = path[i];
+        if (!inSheet(q)) { add(errors, 'SAIDA_FORA_DA_CHAPA', `Saída de corte de ${op.partName} sai da chapa.`, { partA: op.partId }); break; }
+        if (Math.hypot(q.x - path[0].x, q.y - path[0].y) > 0.3 && isMaterial(q)) { add(errors, 'SAIDA_EM_MATERIAL', `Saída de corte de ${op.partName} passaria sobre material de peça.`, { partA: op.partId }); break; }
+      }
+      if (op.tabs && op.tabs.length) {
+        const it = partById.get(op.partId);
+        if (op.kind !== 'OUTER' || !it) { add(errors, 'MICROJUNTA_FORA_DO_CONTORNO', `Microjunta fora do contorno externo em ${op.partName}.`, { partA: op.partId }); continue; }
+        for (const t of op.tabs) {
+          const off = Math.max(ringDist(t.start, it.outer), ringDist(t.end, it.outer));
+          if (off > 0.05) add(errors, 'MICROJUNTA_FORA_DO_CONTORNO', `Microjunta de ${op.partName} não está sobre o contorno (${off.toFixed(3)} mm).`, { partA: op.partId });
+          let len = 0;
+          for (let i = 1; i < t.path.length; i++) len += Math.hypot(t.path[i].x - t.path[i - 1].x, t.path[i].y - t.path[i - 1].y);
+          if (params.tab_width > 0 && Math.abs(len - params.tab_width) > 0.05) add(errors, 'MICROJUNTA_LARGURA', `Microjunta de ${op.partName} com ${len.toFixed(2)} mm (pedido ${params.tab_width} mm).`, { partA: op.partId });
+        }
+      }
+    }
+    if (res.cam.metrics && res.cam.metrics.leadOutsWithoutSpace > 0) {
+      add(warnings, 'SAIDA_SEM_ESPACO', `${res.cam.metrics.leadOutsWithoutSpace} contorno(s) sem espaço para a saída de corte.`);
+    }
     if (res.cam.metrics && res.cam.metrics.rapidCrossings > 0) {
       add(warnings, 'G00_SOBRE_PECA_CORTADA', `${res.cam.metrics.rapidCrossings} deslocamento(s) G00 passam sobre peça já cortada.`);
     }

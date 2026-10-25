@@ -144,6 +144,12 @@ function normalizeNestingParams(rawConfig = {}) {
     external_budget: Math.min(200000, Math.max(20, Math.floor(Number(rawConfig.external_budget ?? 540)))),
     // buscas independentes ao mesmo tempo (sementes diferentes); 0 = automático pelas threads do job
     parallel_searches: Math.min(64, Math.max(0, Math.floor(Number(rawConfig.parallel_searches ?? 0)))),
+    // V5.10 (passo 4, ADR 011): acabamento do corte. Tudo desligado por padrão; NÃO testado em máquina
+    lead_out_length: Math.min(50, Math.max(0, Number(rawConfig.lead_out_length ?? 0))),
+    overburn_length: Math.min(20, Math.max(0, Number(rawConfig.overburn_length ?? 0))),
+    tab_width: Math.min(10, Math.max(0, Number(rawConfig.tab_width ?? 0))),
+    tabs_per_part: Math.min(12, Math.max(0, Math.floor(Number(rawConfig.tabs_per_part ?? 2)))),
+    tab_max_part_size: Math.min(20000, Math.max(0, Number(rawConfig.tab_max_part_size ?? 0))),
     // V5.8 (passo 3): tempo de máquina ESTIMADO. Padrões são ponto de partida, NÃO dado de fabricante (tabela de corte)
     cut_speed_mm_min: Math.min(100000, Math.max(10, Number(rawConfig.cut_speed_mm_min ?? 3000))),
     rapid_speed_mm_min: Math.min(200000, Math.max(100, Number(rawConfig.rapid_speed_mm_min ?? 20000))),

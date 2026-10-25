@@ -248,7 +248,7 @@ function scheduleOptimization(delay = 400) {
 // Mudou chapa, corte ou busca: recalcula (e para o cálculo anterior na hora)
 ['sheetWidth', 'sheetHeight', 'kerfWidthInput', 'partClearanceInput', 'sheetMarginInput', 'holeClearanceInput', 'leadInLengthInput',
   'pierceRadiusInput', 'leadInTypeSelect', 'grainRestrictionSelect', 'allowRotation', 'enableInHole', 'minHoleSize', 'minRemnantSize',
-  'engineSelect', 'qualityModeSelect', 'timeLimitInput', 'iterationsInput', 'optimizationGoal', 'cutSpeedInput', 'pierceTimeInput', 'rapidSpeedInput'
+  'engineSelect', 'qualityModeSelect', 'timeLimitInput', 'iterationsInput', 'optimizationGoal', 'cutSpeedInput', 'pierceTimeInput', 'rapidSpeedInput', 'leadOutInput', 'overburnInput', 'tabWidthInput', 'tabsPerPartInput', 'tabMaxPartInput'
 ].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener('change', () => { if (currentUploadId) { updateHints(); scheduleOptimization(500); } });
@@ -721,6 +721,11 @@ async function startBackendSseOptimization() {
     engine: engineSelect.value,
     external_time_s: (QUALITY_MODES[qualityModeSelect.value] || {}).external_time_s || 30,
     reproducible: reproducibleInput.checked,
+    lead_out_length: Number(document.getElementById('leadOutInput').value) || 0,
+    overburn_length: Number(document.getElementById('overburnInput').value) || 0,
+    tab_width: Number(document.getElementById('tabWidthInput').value) || 0,
+    tabs_per_part: Number(document.getElementById('tabsPerPartInput').value) || 2,
+    tab_max_part_size: Number(document.getElementById('tabMaxPartInput').value) || 0,
     cut_speed_mm_min: Number(document.getElementById('cutSpeedInput').value) || 3000,
     pierce_time_s: Number(document.getElementById('pierceTimeInput').value) || 0,
     rapid_speed_mm_min: Number(document.getElementById('rapidSpeedInput').value) || 20000,
@@ -1146,6 +1151,22 @@ function drawSheetNesting(nesting, isHighlight = false) {
       }
       ctx.fillStyle = color;
       ctx.beginPath(); ctx.arc(sx(op.pierce.x), sy(op.pierce.y), 2.6, 0, Math.PI * 2); ctx.fill();
+      // saída (e sobrepasse): mesma cor, tracejada
+      const outPath = [...(op.overburnPath || []), ...((op.leadOutPath || []).slice(op.overburnPath ? 1 : 0))];
+      if (outPath.length > 1) {
+        ctx.strokeStyle = color; ctx.lineWidth = 1.3; ctx.setLineDash([3, 2]);
+        ctx.beginPath();
+        outPath.forEach((q, i) => (i === 0 ? ctx.moveTo(sx(q.x), sy(q.y)) : ctx.lineTo(sx(q.x), sy(q.y))));
+        ctx.stroke(); ctx.setLineDash([]);
+      }
+      // microjuntas: traço grosso claro sobre o contorno (o trecho que não é cortado)
+      for (const t of op.tabs || []) {
+        ctx.strokeStyle = C.textoClaro; ctx.lineWidth = 4;
+        ctx.beginPath();
+        t.path.forEach((q, i) => (i === 0 ? ctx.moveTo(sx(q.x), sy(q.y)) : ctx.lineTo(sx(q.x), sy(q.y))));
+        ctx.stroke();
+        ctx.strokeStyle = C.mesa; ctx.lineWidth = 1.2; ctx.stroke();
+      }
     });
   }
   ctx.restore();
@@ -1364,6 +1385,26 @@ async function downloadLayoutDxf(layout, fileName) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
   return true;
 }
+// relatório PDF: o conjunto inteiro (com resumo) ou a chapa da tela
+document.getElementById('btnReportPdf').addEventListener('click', async (ev) => {
+  if (!bestSolutionGlobal) return;
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    const sheets = multiResult
+      ? multiResult.sheets.map((sh, i) => ({ layout: i === activeSheet ? bestSolutionGlobal : sh.bestResult, label: sh.label }))
+      : [{ layout: bestSolutionGlobal, label: `chapa ${Math.round(bestSolutionGlobal.sheetWidth)} × ${Math.round(bestSolutionGlobal.sheetHeight)}` }];
+    const r = await fetch('/api/report-pdf', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sheets, meta: { fileName: currentFileName, summary: multiResult ? multiResult.summary : null } }) });
+    if (!r.ok) { const err = await r.json().catch(() => ({})); showCamMessage(`Relatório não gerado: ${err.error || `HTTP ${r.status}`}`); return; }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(await r.blob());
+    a.download = `relatorio_${(currentFileName || 'corte').replace(/\.dxf$/i, '')}.pdf`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  } finally { btn.disabled = false; }
+});
+
 document.getElementById('btnExportAllDxf').addEventListener('click', async (ev) => {
   if (!multiResult) return;
   const btn = ev.currentTarget;
@@ -1479,7 +1520,10 @@ function currentExportOptions() {
     includeSheet: document.getElementById('exportIncludeSheet').checked,
     includeRemnants: exportIncludeRemnantsInput.checked,
     includeLeadIn: exportIncludeLeadInInput.checked,
-    includeLabels: document.getElementById('exportIncludeLabels').checked
+    includeLabels: document.getElementById('exportIncludeLabels').checked,
+    includeLeadOut: document.getElementById('exportIncludeLeadOut').checked,
+    includeTabs: document.getElementById('exportIncludeTabs').checked,
+    openAtTabs: document.getElementById('exportOpenAtTabs').checked
   };
 }
 
